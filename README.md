@@ -52,6 +52,12 @@ mod settings page to download and install an available update. The update replac
 only `JipperKeyViewer.dll`; `settings.json` and `counts.json` remain untouched.
 A game restart is required after installation.
 
+## GitHub Actions
+
+Pushing to `master` builds the Starry references, compiles the plugin, validates
+the package, and creates or updates the matching `v{VERSION}` GitHub Release.
+The release ZIP is the asset consumed by the built-in updater.
+
 Starry discovers the plugin through `ModEntryPoint`; no `Info.json` is required. The existing PC
 projects remain unchanged and continue to provide the UnityModManager and MelonLoader builds.
 

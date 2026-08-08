@@ -1,0 +1,133 @@
+name: Build and release JipperKeyViewer Mobile
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "MobilePlugin/**"
+      - "README.md"
+      - "VERSION.txt"
+      - "package_mod.py"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: jipper-key-viewer-mobile-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MOD_MANAGER_REPOSITORY: StArraySharp/StArray.ModManager
+  MOD_MANAGER_REF: main
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout JipperKeyViewer Mobile
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Checkout StArray.ModManager
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MOD_MANAGER_REPOSITORY }}
+          ref: ${{ env.MOD_MANAGER_REF }}
+          path: dependencies/StArray.ModManager
+
+      - name: Build StArray.ModManager references
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build \
+            dependencies/StArray.ModManager/StArray.ModManager/StArray.ModManager.csproj \
+            --configuration Release
+          dotnet build \
+            dependencies/StArray.ModManager/StArray.ModManager.Android/StArray.ModManager.Android.csproj \
+            --configuration Release
+
+      - name: Prepare build references
+        shell: bash
+        run: |
+          set -euo pipefail
+          manager_root="dependencies/StArray.ModManager"
+          manager_output="$manager_root/StArray.ModManager/bin/Release/net10.0"
+          android_output="$manager_root/StArray.ModManager.Android/bin/Release/net10.0"
+          analyzer_output="$manager_root/StArray.ModManager.Analyzer/bin/Release/netstandard2.0"
+          imgui_dll="$(find "$HOME/.nuget/packages/imgui.net" -path '*/lib/net8.0/ImGui.NET.dll' -type f | sort -V | tail -n 1)"
+          test -f "$manager_output/StArray.ModManager.dll"
+          test -f "$android_output/StArray.ModManager.Android.dll"
+          test -f "$analyzer_output/StArray.ModManager.Analyzer.dll"
+          test -f "$imgui_dll"
+          mkdir -p build-references
+          cp "$manager_output/StArray.ModManager.dll" build-references/StArray.ModManager.dll
+          cp "$android_output/StArray.ModManager.Android.dll" build-references/StArray.ModManager.Android.dll
+          cp "$analyzer_output/StArray.ModManager.Analyzer.dll" build-references/StArray.ModManager.Analyzer.dll
+          cp "$imgui_dll" build-references/ImGui.NET.dll
+
+      - name: Build JipperKeyViewer Mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION.txt)"
+          test -n "$version"
+          dotnet build MobilePlugin/JipperKeyViewer.csproj \
+            --configuration Release \
+            -p:Version="$version" \
+            -p:StarryReferences="$GITHUB_WORKSPACE/build-references"
+
+      - name: Package and validate
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < VERSION.txt)"
+          package="JipperKeyViewer-${version}.zip"
+          python3 package_mod.py
+          test -f "$package"
+          unzip -t "$package"
+          ! unzip -Z1 "$package" | grep -E '(^|/)(settings|counts)\.json$'
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JipperKeyViewer-${{ steps.package.outputs.version }}
+          path: JipperKeyViewer-${{ steps.package.outputs.version }}.zip
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+          RELEASE_PACKAGE: ${{ steps.package.outputs.package }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RELEASE_PACKAGE" --clobber
+          elif git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG" >/dev/null; then
+            gh release create "$RELEASE_TAG" "$RELEASE_PACKAGE" \
+              --verify-tag \
+              --title "JipperKeyViewer Mobile $RELEASE_VERSION" \
+              --generate-notes
+          else
+            gh release create "$RELEASE_TAG" "$RELEASE_PACKAGE" \
+              --target "$GITHUB_SHA" \
+              --title "JipperKeyViewer Mobile $RELEASE_VERSION" \
+              --generate-notes
+          fi
