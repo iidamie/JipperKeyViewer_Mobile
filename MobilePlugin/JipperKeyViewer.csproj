@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>JipperKeyViewer</AssemblyName>
+    <RootNamespace>JipperKeyViewer.Mobile</RootNamespace>
+    <Version>1.6.5-mobile.15</Version>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <Deterministic>true</Deterministic>
+    <StarryReferences Condition="'$(StarryReferences)' == ''">../../../YoonKeyViewer_Mobile/References</StarryReferences>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Analyzer Include="$(StarryReferences)/StArray.ModManager.Analyzer.dll" />
+    <Reference Include="StArray.ModManager">
+      <HintPath>$(StarryReferences)/StArray.ModManager.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="StArray.ModManager.Android">
+      <HintPath>$(StarryReferences)/StArray.ModManager.Android.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ImGui.NET">
+      <HintPath>$(StarryReferences)/ImGui.NET.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

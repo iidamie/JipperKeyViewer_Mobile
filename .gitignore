@@ -1,0 +1,8 @@
+MobilePlugin/bin/
+MobilePlugin/obj/
+__pycache__/
+*.log
+logcat-output*.txt
+*.zip
+References/*.dll
+References/*.xml
