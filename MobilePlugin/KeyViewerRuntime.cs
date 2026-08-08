@@ -21,7 +21,7 @@ internal static class KeyViewerRuntime
         internal bool Foot;
         internal float Started;
         internal float? Released;
-        internal float ReleaseLength;
+        internal float ReleaseTravel;
     }
 
     private static readonly ConcurrentQueue<TouchEventInfo> TouchEvents = new();
@@ -33,6 +33,7 @@ internal static class KeyViewerRuntime
     private static readonly bool[] MainPressed = new bool[MaxMainKeys];
     private static readonly bool[] FootPressed = new bool[MaxFootKeys];
     private static readonly int[] FrontSequence = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    private static readonly int[] FootSequence = { 0, 1, 2, 3, 4, 5, 6, 7 };
     private static readonly Queue<float> PressTimes = new(256);
     private static readonly Queue<float>[] SlotPressTimes = CreateSlotQueues();
     private static readonly List<KeyRect> Geometry = new(32);
@@ -229,7 +230,6 @@ internal static class KeyViewerRuntime
     {
         ReleasePointer(pointerId);
 
-        float normalizedX = Math.Clamp(x / Math.Max(1f, display.X), 0f, 0.999999f);
         float normalizedY = Math.Clamp(y / Math.Max(1f, display.Y), 0f, 0.999999f);
         int footCount = settings.FootKeyCount;
         float footHeight = settings.TouchFootAreaEnabled && footCount > 0
@@ -238,7 +238,12 @@ internal static class KeyViewerRuntime
 
         if (footHeight > 0f && normalizedY >= handHeight)
         {
-            int foot = Math.Clamp((int)(normalizedX * footCount), 0, footCount - 1);
+            int foot = SelectNearestTouchKey(
+                FootSequence,
+                footCount,
+                true,
+                x,
+                display.X);
             TouchFootCounts[foot]++;
             ActivePointers[pointerId] = new TouchBinding(foot, true);
             return;
@@ -248,10 +253,63 @@ internal static class KeyViewerRuntime
         int row = Math.Clamp((int)(normalizedY / Math.Max(0.0001f, handHeight) * mainRows), 0, mainRows - 1);
         IReadOnlyList<int> rowKeys = TouchRow(settings.Layout, row);
         if (rowKeys.Count == 0) return;
-        int rowPosition = Math.Clamp((int)(normalizedX * rowKeys.Count), 0, rowKeys.Count - 1);
-        int key = rowKeys[rowPosition];
+        int key = SelectNearestTouchKey(rowKeys, rowKeys.Count, false, x, display.X);
         TouchMainCounts[key]++;
         ActivePointers[pointerId] = new TouchBinding(key, false);
+    }
+
+    private static int SelectNearestTouchKey(
+        IReadOnlyList<int> candidates,
+        int candidateCount,
+        bool foot,
+        float touchX,
+        float displayWidth)
+    {
+        int nearest = candidates[0];
+        int nearestAvailable = -1;
+        float nearestDistance = float.MaxValue;
+        float nearestAvailableDistance = float.MaxValue;
+
+        // Touch down events are dequeued chronologically. The first finger claims
+        // the closest key; later fingers skip already claimed keys and take the
+        // closest remaining key in the same touch row/area.
+        for (int position = 0; position < candidateCount; position++)
+        {
+            int key = candidates[position];
+            float center = TouchKeyCenter(position, candidateCount, displayWidth);
+            float distance = MathF.Abs(touchX - center);
+            if (distance < nearestDistance)
+            {
+                nearest = key;
+                nearestDistance = distance;
+            }
+
+            if (IsTouchKeyOccupied(key, foot))
+                continue;
+            if (distance < nearestAvailableDistance)
+            {
+                nearestAvailable = key;
+                nearestAvailableDistance = distance;
+            }
+        }
+
+        return nearestAvailable >= 0 ? nearestAvailable : nearest;
+    }
+
+    private static float TouchKeyCenter(
+        int position,
+        int candidateCount,
+        float displayWidth)
+        => displayWidth * (position + 0.5f) / Math.Max(1, candidateCount);
+
+    private static bool IsTouchKeyOccupied(int index, bool foot)
+    {
+        foreach (TouchBinding binding in ActivePointers.Values)
+        {
+            if (binding.Index == index && binding.Foot == foot)
+                return true;
+        }
+        return false;
     }
 
     private static void ReleasePointer(int pointerId)
@@ -320,7 +378,7 @@ internal static class KeyViewerRuntime
                 {
                     drop.Released = _time;
                     float speed = Math.Max(20f, settings.RainSpeed);
-                    drop.ReleaseLength = Math.Max(0f, (_time - drop.Started) * speed);
+                    drop.ReleaseTravel = Math.Max(0f, (_time - drop.Started) * speed);
                     break;
                 }
             }
@@ -356,13 +414,12 @@ internal static class KeyViewerRuntime
         float speed = Math.Max(20f, settings.RainSpeed);
         float maxHeight = Math.Max(20f, settings.RainHeight);
         float fadePixels = Math.Clamp(settings.RainFadePixels, 0f, maxHeight);
-        float lengthScale = Math.Clamp(settings.RainLength, 0.1f, 3f);
         float fadeEnd = maxHeight + fadePixels;
         for (int i = RainDrops.Count - 1; i >= 0; i--)
         {
             RainDrop drop = RainDrops[i];
             if (drop.Released.HasValue
-                && (_time - drop.Started) * speed >= fadeEnd + drop.ReleaseLength * lengthScale)
+                && (_time - drop.Released.Value) * speed >= fadeEnd)
                 RainDrops.RemoveAt(i);
         }
     }
@@ -381,11 +438,21 @@ internal static class KeyViewerRuntime
             if (!currentRect.HasValue) continue;
             KeyRect rect = currentRect.Value;
             float travel = Math.Max(0f, (_time - drop.Started) * speed);
-            float trailLength = drop.Released.HasValue
-                ? drop.ReleaseLength * lengthScale
-                : travel * lengthScale;
-            float nearDistance = Math.Max(0f, travel - trailLength);
-            float farDistance = Math.Min(travel, maxHeight + fadePixels);
+            float nearDistance;
+            float farDistance;
+            if (drop.Released.HasValue)
+            {
+                float afterRelease = Math.Max(0f, (_time - drop.Released.Value) * speed);
+                nearDistance = afterRelease;
+                farDistance = afterRelease + drop.ReleaseTravel * lengthScale;
+            }
+            else
+            {
+                // While held, the rain always grows from the key's top edge.
+                nearDistance = 0f;
+                farDistance = travel * lengthScale;
+            }
+            farDistance = Math.Min(farDistance, maxHeight + fadePixels);
             if (farDistance - nearDistance <= 1f) continue;
 
             float keyWidth = rect.Max.X - rect.Min.X;
@@ -551,9 +618,17 @@ internal static class KeyViewerRuntime
             float top = handBottom * row / mainRows;
             float bottom = handBottom * (row + 1) / mainRows;
             IReadOnlyList<int> rowKeys = TouchRow(settings.Layout, row);
-            for (int column = 1; column < rowKeys.Count; column++)
+            for (int column = 0; column < rowKeys.Count - 1; column++)
             {
-                float x = display.X * column / rowKeys.Count;
+                float leftCenter = TouchKeyCenter(
+                    column,
+                    rowKeys.Count,
+                    display.X);
+                float rightCenter = TouchKeyCenter(
+                    column + 1,
+                    rowKeys.Count,
+                    display.X);
+                float x = (leftCenter + rightCenter) * 0.5f;
                 drawList.AddLine(new Vector2(x, top), new Vector2(x, bottom), handColor, 2f);
             }
 
@@ -567,9 +642,17 @@ internal static class KeyViewerRuntime
             3f);
 
         if (footCount == 0) return;
-        for (int column = 1; column < footCount; column++)
+        for (int column = 0; column < footCount - 1; column++)
         {
-            float x = display.X * column / footCount;
+            float leftCenter = TouchKeyCenter(
+                column,
+                footCount,
+                display.X);
+            float rightCenter = TouchKeyCenter(
+                column + 1,
+                footCount,
+                display.X);
+            float x = (leftCenter + rightCenter) * 0.5f;
             drawList.AddLine(new Vector2(x, handBottom), new Vector2(x, display.Y), footColor, 2f);
         }
     }

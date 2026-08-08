@@ -20,9 +20,11 @@ Implemented mobile features:
 - GitHub mobile-release checking and in-place DLL updates from the Mod settings page
 
 Touch input is coordinate-based: Android touch events do not contain the original PC key identity.
-Following YoonKeyViewer-mobile, each pointer is assigned to a full-screen touch region on `Down`
-and keeps that key until `Up` or `Cancel`, so sliding fingers do not jump between keys. The visual
-keyboard is independent from the touch mapping surface and can be positioned freely.
+Each pointer is assigned on `Down` to the closest key in its touch row or foot area and keeps that
+key until `Up` or `Cancel`, so sliding fingers do not jump between keys. If several fingers land in
+one area, the earlier pointer claims the closest key first and later pointers choose the closest
+remaining keys. The visual keyboard is independent from the touch mapping surface and can be
+positioned freely.
 
 ## Build
 
