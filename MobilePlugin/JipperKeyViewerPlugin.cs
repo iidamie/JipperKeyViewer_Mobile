@@ -41,7 +41,7 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
     public string Id => "JipperKeyViewer";
     public string Name => "Jipper Key Viewer Mobile";
-    public string Version => "1.6.5-mobile.16";
+    public string Version => "1.6.5-mobile.17";
     public string Author => "HitMargin / mobile port";
     public string Description => "Jipper Key Viewer touch and keyboard overlay for ADOFAI Android";
     public IReadOnlyList<string> Dependencies => Array.Empty<string>();
