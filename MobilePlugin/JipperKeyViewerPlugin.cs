@@ -15,6 +15,7 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
     private const string LogTag = "JipperKeyViewer";
     private readonly SettingsStore _settingsStore;
     private readonly string _modDirectory;
+    private readonly ReplayApiBinding _replayApi = new();
     private long _lastFrameTicks;
     private long _nextGameProbeTicks;
     private GameApi? _game;
@@ -50,6 +51,7 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
         _loaded = true;
         Settings ??= new KeyViewerSettings();
         Settings.Normalize();
+        _replayApi.TryBind();
         KeyViewerRuntime.Reset(Settings);
         _settingsPanelDrawnThisFrame = false;
         _lastSavedTotalCount = Settings.TotalCount;
@@ -64,6 +66,7 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
     public void OnUnload()
     {
         _loaded = false;
+        _replayApi.Dispose();
         InputEvents.OnTouch -= OnTouch;
         _updateService?.Dispose();
         _updateService = null;
@@ -97,7 +100,8 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
     private void OnTouch(TouchEventInfo info)
     {
-        if (_loaded) KeyViewerRuntime.EnqueueTouch(info);
+        if (_loaded && !_replayApi.IsPlaybackActive)
+            KeyViewerRuntime.EnqueueTouch(info);
     }
 
     public void OnForegroundGUI(ImDrawListPtr drawList)
@@ -125,7 +129,8 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
         _lastFrameTicks = now;
         try
         {
-            KeyViewerRuntime.Update(this, delta);
+            _replayApi.TryBind();
+            KeyViewerRuntime.Update(this, delta, _replayApi.IsPlaybackActive);
             AutoSaveCounts(now);
             KeyViewerRuntime.Render(this, drawList);
         }

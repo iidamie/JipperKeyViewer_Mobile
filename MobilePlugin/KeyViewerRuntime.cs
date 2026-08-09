@@ -14,6 +14,13 @@ internal static class KeyViewerRuntime
     private const int TouchQueueCapacity = 1024;
 
     private readonly record struct TouchBinding(int Index, bool Foot);
+    private readonly record struct ReplayTouchEvent(
+        AndroidInput.MotionAction Action,
+        int PointerId,
+        float X,
+        float Y,
+        float SourceWidth,
+        float SourceHeight);
 
     private sealed class RainDrop
     {
@@ -25,13 +32,19 @@ internal static class KeyViewerRuntime
     }
 
     private static readonly ConcurrentQueue<TouchEventInfo> TouchEvents = new();
+    private static readonly ConcurrentQueue<ReplayTouchEvent> ReplayTouchEvents = new();
     private static readonly Dictionary<int, TouchBinding> ActivePointers = new();
+    private static readonly Dictionary<int, TouchBinding> ReplayPointers = new();
     private static readonly int[] TouchMainCounts = new int[MaxMainKeys];
     private static readonly int[] TouchFootCounts = new int[MaxFootKeys];
     private static readonly bool[] KeyboardMainPressed = new bool[MaxMainKeys];
     private static readonly bool[] KeyboardFootPressed = new bool[MaxFootKeys];
     private static readonly bool[] MainPressed = new bool[MaxMainKeys];
     private static readonly bool[] FootPressed = new bool[MaxFootKeys];
+    private static readonly int[] ReplayMainCounts = new int[MaxMainKeys];
+    private static readonly int[] ReplayFootCounts = new int[MaxFootKeys];
+    private static readonly bool[] ReplayMainPressed = new bool[MaxMainKeys];
+    private static readonly bool[] ReplayFootPressed = new bool[MaxFootKeys];
     private static readonly int[] FrontSequence = { 0, 1, 2, 3, 4, 5, 6, 7 };
     private static readonly int[] FootSequence = { 0, 1, 2, 3, 4, 5, 6, 7 };
     private static readonly Queue<float> PressTimes = new(256);
@@ -52,13 +65,19 @@ internal static class KeyViewerRuntime
     internal static void Reset(KeyViewerSettings settings)
     {
         DrainTouchEvents();
+        DrainReplayTouchEvents();
         Array.Clear(TouchMainCounts);
         Array.Clear(TouchFootCounts);
         Array.Clear(KeyboardMainPressed);
         Array.Clear(KeyboardFootPressed);
         Array.Clear(MainPressed);
         Array.Clear(FootPressed);
+        Array.Clear(ReplayMainCounts);
+        Array.Clear(ReplayFootCounts);
+        Array.Clear(ReplayMainPressed);
+        Array.Clear(ReplayFootPressed);
         ActivePointers.Clear();
+        ReplayPointers.Clear();
         PressTimes.Clear();
         foreach (Queue<float> queue in SlotPressTimes) queue.Clear();
         RainDrops.Clear();
@@ -77,13 +96,19 @@ internal static class KeyViewerRuntime
     internal static void ResetInputState()
     {
         DrainTouchEvents();
+        DrainReplayTouchEvents();
         ActivePointers.Clear();
+        ReplayPointers.Clear();
         Array.Clear(TouchMainCounts);
         Array.Clear(TouchFootCounts);
         Array.Clear(KeyboardMainPressed);
         Array.Clear(KeyboardFootPressed);
         Array.Clear(MainPressed);
         Array.Clear(FootPressed);
+        Array.Clear(ReplayMainCounts);
+        Array.Clear(ReplayFootCounts);
+        Array.Clear(ReplayMainPressed);
+        Array.Clear(ReplayFootPressed);
         RainDrops.Clear();
         PressTimes.Clear();
         foreach (Queue<float> queue in SlotPressTimes) queue.Clear();
@@ -105,7 +130,24 @@ internal static class KeyViewerRuntime
         TouchEvents.Enqueue(info);
     }
 
-    internal static void Update(JipperKeyViewerPlugin plugin, float delta)
+    internal static void EnqueueReplayTouch(
+        AndroidInput.MotionAction action,
+        int pointerId,
+        float x,
+        float y,
+        float sourceWidth,
+        float sourceHeight)
+    {
+        while (ReplayTouchEvents.Count >= TouchQueueCapacity && ReplayTouchEvents.TryDequeue(out _)) { }
+        ReplayTouchEvents.Enqueue(new ReplayTouchEvent(
+            action, pointerId, x, y, sourceWidth, sourceHeight));
+    }
+
+    internal static void OnReplayStarted() => ResetInputState();
+
+    internal static void OnReplayEnded() => ResetInputState();
+
+    internal static void Update(JipperKeyViewerPlugin plugin, float delta, bool replayPlayback)
     {
         KeyViewerSettings settings = plugin.Settings;
         settings.Normalize();
@@ -144,14 +186,24 @@ internal static class KeyViewerRuntime
             ResetInputState();
         _active = true;
 
-        if (settings.TouchInputEnabled)
-            ProcessTouchEvents(settings, display);
+        if (replayPlayback)
+        {
+            ClearPhysicalTouchInputState();
+            ProcessReplayTouchEvents(settings, display);
+            Array.Clear(KeyboardMainPressed);
+            Array.Clear(KeyboardFootPressed);
+        }
         else
         {
-            ClearTouchInputState(clearRain: false);
+            ClearReplayTouchInputState(clearRain: false);
+            if (settings.TouchInputEnabled)
+                ProcessTouchEvents(settings, display);
+            else
+                ClearTouchInputState(clearRain: false);
+
+            PollKeyboard(settings);
         }
 
-        PollKeyboard(settings);
         ProcessKeyStates(settings);
         TrimPressTimes(settings);
         TrimRain(settings);
@@ -216,6 +268,52 @@ internal static class KeyViewerRuntime
         }
     }
 
+    private static void ClearPhysicalTouchInputState()
+    {
+        ClearTouchInputState(clearRain: false);
+        Array.Clear(KeyboardMainPressed);
+        Array.Clear(KeyboardFootPressed);
+    }
+
+    private static void ClearReplayTouchInputState(bool clearRain)
+    {
+        DrainReplayTouchEvents();
+        ReplayPointers.Clear();
+        Array.Clear(ReplayMainCounts);
+        Array.Clear(ReplayFootCounts);
+        Array.Clear(ReplayMainPressed);
+        Array.Clear(ReplayFootPressed);
+        if (clearRain)
+            RainDrops.Clear();
+    }
+
+    private static void ProcessReplayTouchEvents(KeyViewerSettings settings, Vector2 display)
+    {
+        while (ReplayTouchEvents.TryDequeue(out ReplayTouchEvent info))
+        {
+            switch (info.Action)
+            {
+                case AndroidInput.MotionAction.Down:
+                case AndroidInput.MotionAction.PointerDown:
+                    float x = info.SourceWidth > 0f
+                        ? info.X / info.SourceWidth * display.X
+                        : info.X;
+                    float y = info.SourceHeight > 0f
+                        ? info.Y / info.SourceHeight * display.Y
+                        : info.Y;
+                    PressPointer(settings, display, info.PointerId, x, y, replay: true);
+                    break;
+                case AndroidInput.MotionAction.Up:
+                case AndroidInput.MotionAction.PointerUp:
+                    ReleasePointer(info.PointerId, replay: true);
+                    break;
+                case AndroidInput.MotionAction.Cancel:
+                    ClearReplayTouchInputState(clearRain: false);
+                    break;
+            }
+        }
+    }
+
     private static void ClearTouchInputState(bool clearRain)
     {
         DrainTouchEvents();
@@ -226,9 +324,15 @@ internal static class KeyViewerRuntime
             RainDrops.Clear();
     }
 
-    private static void PressPointer(KeyViewerSettings settings, Vector2 display, int pointerId, float x, float y)
+    private static void PressPointer(
+        KeyViewerSettings settings,
+        Vector2 display,
+        int pointerId,
+        float x,
+        float y,
+        bool replay = false)
     {
-        ReleasePointer(pointerId);
+        ReleasePointer(pointerId, replay);
 
         float normalizedY = Math.Clamp(y / Math.Max(1f, display.Y), 0f, 0.999999f);
         int footCount = settings.FootKeyCount;
@@ -243,9 +347,11 @@ internal static class KeyViewerRuntime
                 footCount,
                 true,
                 x,
-                display.X);
-            TouchFootCounts[foot]++;
-            ActivePointers[pointerId] = new TouchBinding(foot, true);
+                display.X,
+                replay ? ReplayPointers : ActivePointers);
+            int[] footCounts = replay ? ReplayFootCounts : TouchFootCounts;
+            footCounts[foot]++;
+            (replay ? ReplayPointers : ActivePointers)[pointerId] = new TouchBinding(foot, true);
             return;
         }
 
@@ -253,9 +359,16 @@ internal static class KeyViewerRuntime
         int row = Math.Clamp((int)(normalizedY / Math.Max(0.0001f, handHeight) * mainRows), 0, mainRows - 1);
         IReadOnlyList<int> rowKeys = TouchRow(settings.Layout, row);
         if (rowKeys.Count == 0) return;
-        int key = SelectNearestTouchKey(rowKeys, rowKeys.Count, false, x, display.X);
-        TouchMainCounts[key]++;
-        ActivePointers[pointerId] = new TouchBinding(key, false);
+        int key = SelectNearestTouchKey(
+            rowKeys,
+            rowKeys.Count,
+            false,
+            x,
+            display.X,
+            replay ? ReplayPointers : ActivePointers);
+        int[] mainCounts = replay ? ReplayMainCounts : TouchMainCounts;
+        mainCounts[key]++;
+        (replay ? ReplayPointers : ActivePointers)[pointerId] = new TouchBinding(key, false);
     }
 
     private static int SelectNearestTouchKey(
@@ -263,7 +376,8 @@ internal static class KeyViewerRuntime
         int candidateCount,
         bool foot,
         float touchX,
-        float displayWidth)
+        float displayWidth,
+        Dictionary<int, TouchBinding> pointers)
     {
         int nearest = candidates[0];
         int nearestAvailable = -1;
@@ -284,7 +398,7 @@ internal static class KeyViewerRuntime
                 nearestDistance = distance;
             }
 
-            if (IsTouchKeyOccupied(key, foot))
+            if (IsTouchKeyOccupied(key, foot, pointers))
                 continue;
             if (distance < nearestAvailableDistance)
             {
@@ -302,9 +416,12 @@ internal static class KeyViewerRuntime
         float displayWidth)
         => displayWidth * (position + 0.5f) / Math.Max(1, candidateCount);
 
-    private static bool IsTouchKeyOccupied(int index, bool foot)
+    private static bool IsTouchKeyOccupied(
+        int index,
+        bool foot,
+        Dictionary<int, TouchBinding> pointers)
     {
-        foreach (TouchBinding binding in ActivePointers.Values)
+        foreach (TouchBinding binding in pointers.Values)
         {
             if (binding.Index == index && binding.Foot == foot)
                 return true;
@@ -312,13 +429,18 @@ internal static class KeyViewerRuntime
         return false;
     }
 
-    private static void ReleasePointer(int pointerId)
+    private static void ReleasePointer(int pointerId, bool replay = false)
     {
-        if (!ActivePointers.Remove(pointerId, out TouchBinding binding)) return;
+        Dictionary<int, TouchBinding> pointers = replay ? ReplayPointers : ActivePointers;
+        if (!pointers.Remove(pointerId, out TouchBinding binding)) return;
         if (binding.Foot)
-            TouchFootCounts[binding.Index] = Math.Max(0, TouchFootCounts[binding.Index] - 1);
-        else
-            TouchMainCounts[binding.Index] = Math.Max(0, TouchMainCounts[binding.Index] - 1);
+        {
+            int[] counts = replay ? ReplayFootCounts : TouchFootCounts;
+            counts[binding.Index] = Math.Max(0, counts[binding.Index] - 1);
+            return;
+        }
+        int[] mainCounts = replay ? ReplayMainCounts : TouchMainCounts;
+        mainCounts[binding.Index] = Math.Max(0, mainCounts[binding.Index] - 1);
     }
 
     private static void PollKeyboard(KeyViewerSettings settings)
@@ -337,9 +459,17 @@ internal static class KeyViewerRuntime
     {
         int mainCount = Defaults.Count(settings.Layout);
         for (int i = 0; i < mainCount; i++)
-            ProcessSlot(settings, i, false, TouchMainCounts[i] > 0 || KeyboardMainPressed[i]);
+            ProcessSlot(
+                settings,
+                i,
+                false,
+                TouchMainCounts[i] > 0 || KeyboardMainPressed[i] || ReplayMainCounts[i] > 0);
         for (int i = 0; i < settings.FootKeyCount; i++)
-            ProcessSlot(settings, i, true, TouchFootCounts[i] > 0 || KeyboardFootPressed[i]);
+            ProcessSlot(
+                settings,
+                i,
+                true,
+                TouchFootCounts[i] > 0 || KeyboardFootPressed[i] || ReplayFootCounts[i] > 0);
     }
 
     private static void ProcessSlot(KeyViewerSettings settings, int index, bool foot, bool current)
@@ -794,5 +924,10 @@ internal static class KeyViewerRuntime
     private static void DrainTouchEvents()
     {
         while (TouchEvents.TryDequeue(out _)) { }
+    }
+
+    private static void DrainReplayTouchEvents()
+    {
+        while (ReplayTouchEvents.TryDequeue(out _)) { }
     }
 }
