@@ -4,7 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>JipperKeyViewer</AssemblyName>
     <RootNamespace>JipperKeyViewer.Mobile</RootNamespace>
-    <Version>1.6.5-mobile.17</Version>
+    <Version>1.6.5-mobile.18</Version>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -28,6 +28,11 @@
       <HintPath>$(StarryReferences)/ImGui.NET.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets/MAPLESTORY_OTF_BOLD.OTF"
+                      LogicalName="JipperKeyViewer.Mobile.Assets.MAPLESTORY_OTF_BOLD.OTF" />
   </ItemGroup>
 
 </Project>

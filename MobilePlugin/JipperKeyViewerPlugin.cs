@@ -41,7 +41,7 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
     public string Id => "JipperKeyViewer";
     public string Name => "Jipper Key Viewer Mobile";
-    public string Version => "1.6.5-mobile.16";
+    public string Version => "1.6.5-mobile.18";
     public string Author => "HitMargin / mobile port";
     public string Description => "Jipper Key Viewer touch and keyboard overlay for ADOFAI Android";
     public IReadOnlyList<string> Dependencies => Array.Empty<string>();
@@ -52,6 +52,7 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
         Settings ??= new KeyViewerSettings();
         Settings.Normalize();
         _replayApi.TryBind();
+        KeyViewerFontRuntime.Reset();
         KeyViewerRuntime.Reset(Settings);
         _settingsPanelDrawnThisFrame = false;
         _lastSavedTotalCount = Settings.TotalCount;
@@ -70,6 +71,7 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
         InputEvents.OnTouch -= OnTouch;
         _updateService?.Dispose();
         _updateService = null;
+        KeyViewerFontRuntime.Reset();
         KeyViewerRuntime.Reset(Settings);
         _game = null;
         _settingsPanelDrawnThisFrame = false;
@@ -148,6 +150,48 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
         ImGui.TextDisabled(_game == null ? "waiting for ADOFAI runtime" : "runtime ready");
         ImGui.Separator();
 
+        if (ImGui.Button("Clear counts##jipper-actions-clear"))
+        {
+            KeyViewerRuntime.ClearCounts(Settings);
+            SaveSettingsNow();
+            _notice = "Counts cleared";
+            _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Save settings##jipper-actions-save"))
+        {
+            SaveSettingsNow();
+            _notice = "Settings saved";
+            _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
+        }
+        if (DateTime.UtcNow < _noticeUntilUtc)
+            ImGui.TextDisabled(_notice);
+
+        float footerReserve = ImGui.GetFrameHeightWithSpacing() * 2f;
+        if (ImGui.BeginChild(
+                "##jipper-settings-scroll",
+                new Vector2(0f, -footerReserve),
+                ImGuiChildFlags.Borders,
+                ImGuiWindowFlags.HorizontalScrollbar | ImGuiWindowFlags.AlwaysVerticalScrollbar))
+        {
+            if (ImGui.BeginTabBar("##jipper-settings-tabs"))
+            {
+                DrawGeneralSettingsTab();
+                DrawLayoutSettingsTab();
+                DrawRainSettingsTab();
+                DrawKeyBindingsTab();
+                DrawUpdateTab();
+                ImGui.EndTabBar();
+            }
+        }
+        ImGui.EndChild();
+    }
+
+    private void DrawGeneralSettingsTab()
+    {
+        if (!ImGui.BeginTabItem("General"))
+            return;
+
         string[] layoutNames = { "8K", "10K", "12K", "14K", "16K", "20K", "24K" };
         int layout = (int)Settings.Layout;
         if (ImGui.Combo("Layout", ref layout, layoutNames, layoutNames.Length))
@@ -170,9 +214,15 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
         ImGui.Checkbox("Streamer mode", ref Settings.StreamerMode);
         ImGui.Checkbox("Per-key KPS", ref Settings.ShowPerKeyKps);
         ImGui.Checkbox("Count formatting", ref Settings.EnableCountFormatting);
+        ImGui.EndTabItem();
+    }
+
+    private void DrawLayoutSettingsTab()
+    {
+        if (!ImGui.BeginTabItem("Layout"))
+            return;
 
         ImGui.Separator();
-        ImGui.TextUnformatted("Layout");
         ImGui.SliderFloat("Scale", ref Settings.Scale, 0.45f, 2f, "%.2f");
         ImGui.SliderFloat("Horizontal position", ref Settings.PositionX, 0f, 1f, "%.2f");
         ImGui.SliderFloat("Vertical position", ref Settings.PositionY, 0f, 1f, "%.2f");
@@ -184,6 +234,13 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
             Settings.Normalize();
             KeyViewerRuntime.ResetInputState();
         }
+        ImGui.EndTabItem();
+    }
+
+    private void DrawRainSettingsTab()
+    {
+        if (!ImGui.BeginTabItem("Rain"))
+            return;
 
         ImGui.Checkbox("Rain effect", ref Settings.EnableRain);
         if (Settings.EnableRain)
@@ -194,38 +251,31 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
             ImGui.SliderFloat("Rain length", ref Settings.RainLength, 0.1f, 3f, "%.2fx");
             ImGui.SliderFloat("Rain width", ref Settings.RainWidth, 0.1f, 2f, "%.2fx key");
         }
+        ImGui.EndTabItem();
+    }
 
-        if (ImGui.Button("Clear counts"))
-        {
-            KeyViewerRuntime.ClearCounts(Settings);
-            SaveSettingsNow();
-            _notice = "Counts cleared";
-            _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
-        }
+    private void DrawKeyBindingsTab()
+    {
+        if (!ImGui.BeginTabItem("Keys"))
+            return;
 
-        if (ImGui.CollapsingHeader("Key bindings"))
+        DrawBindingFields(Settings.CurrentBindings, Settings.CurrentLabels, false);
+        if (Settings.FootKeyCount > 0)
         {
-            DrawBindingFields(Settings.CurrentBindings, Settings.CurrentLabels, false);
-            if (Settings.FootKeyCount > 0)
-            {
-                ImGui.Separator();
-                ImGui.TextUnformatted("Foot bindings");
-                DrawBindingFields(Settings.FootBindings, Settings.FootLabels, true);
-            }
+            ImGui.Separator();
+            ImGui.TextUnformatted("Foot bindings");
+            DrawBindingFields(Settings.FootBindings, Settings.FootLabels, true);
         }
+        ImGui.EndTabItem();
+    }
 
-        if (ImGui.Button("Save settings"))
-        {
-            SaveSettingsNow();
-            _notice = "Settings saved";
-            _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
-        }
-        if (DateTime.UtcNow < _noticeUntilUtc)
-            ImGui.SameLine();
-        if (DateTime.UtcNow < _noticeUntilUtc)
-            ImGui.TextDisabled(_notice);
+    private void DrawUpdateTab()
+    {
+        if (!ImGui.BeginTabItem("Updates"))
+            return;
 
         _updateService?.DrawGui();
+        ImGui.EndTabItem();
     }
 
     private void AutoSaveCounts(long now)

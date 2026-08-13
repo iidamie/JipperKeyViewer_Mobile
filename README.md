@@ -15,6 +15,7 @@ Implemented mobile features:
 - per-key count, optional per-key KPS, global KPS, total count, and count formatting
 - configurable position, scale, key gap, bindings, labels, colors, and touch debug outlines
 - lightweight ImGui rain effect with configurable speed, height, length, width, and release fade
+- the original PC MapleStory OTF embedded for keyboard labels, counters, and KPS status
 - gameplay-only visibility using the `scrController` runtime facade
 - `settings.json` persistence in the ModManager mod directory
 - GitHub mobile-release checking and in-place DLL updates from the Mod settings page
@@ -67,5 +68,5 @@ projects remain unchanged and continue to provide the UnityModManager and MelonL
 
 The mobile port currently uses ImGui primitives instead of the PC sprite/AssetBundle/TMP renderer.
 The 108-key full keyboard, foot-layout variants beyond the mobile touch row, profiles, ghost rain,
-custom fonts, and the PC per-row rain controls are not included in this first port. They can be
+custom font selection, and the PC per-row rain controls are not included in this first port. They can be
 added without changing the Starry entry point or touch state machine.

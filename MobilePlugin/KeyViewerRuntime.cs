@@ -231,7 +231,7 @@ internal static class KeyViewerRuntime
         if (Geometry.Count == 0) return;
 
         DrawRain(settings, drawList);
-        ImFontPtr font = ImGui.GetFont();
+        ImFontPtr font = KeyViewerFontRuntime.GetFont();
         foreach (KeyRect rect in Geometry)
             DrawKey(settings, rect, font, drawList);
 
@@ -661,7 +661,7 @@ internal static class KeyViewerRuntime
         Vector2 valuePosition = new(
             rect.Min.X + (rect.Max.X - rect.Min.X - valueMeasure.X) * 0.5f,
             rect.Max.Y - valueMeasure.Y - Math.Max(3f, height * 0.08f));
-        drawList.AddText(font, valueSize, valuePosition, textColor, value);
+        KeyViewerFontRuntime.AddText(drawList, font, valueSize, valuePosition, textColor, value);
     }
 
     private static void DrawStatusKey(
@@ -792,7 +792,14 @@ internal static class KeyViewerRuntime
         string status = plugin.Game == null
             ? "Touch preview: waiting for ADOFAI runtime"
             : "Touch preview: enter gameplay to enable input";
-        drawList.AddText(new Vector2(12f, 12f), 0xF0FFFFFF, status);
+        ImFontPtr font = KeyViewerFontRuntime.GetFont();
+        KeyViewerFontRuntime.AddText(
+            drawList,
+            font,
+            Math.Clamp(ImGui.GetFontSize(), 12f, 24f),
+            new Vector2(12f, 12f),
+            0xF0FFFFFF,
+            status);
     }
 
     private static string GetLabel(KeyViewerSettings settings, KeyRect rect)
@@ -896,8 +903,14 @@ internal static class KeyViewerRuntime
 
     private static void AddTextShadow(ImDrawListPtr drawList, ImFontPtr font, float size, Vector2 position, uint color, string text)
     {
-        drawList.AddText(font, size, position + new Vector2(1f, 1f), 0xB0000000, text);
-        drawList.AddText(font, size, position, color, text);
+        KeyViewerFontRuntime.AddText(
+            drawList,
+            font,
+            size,
+            position + new Vector2(1f, 1f),
+            0xB0000000,
+            text);
+        KeyViewerFontRuntime.AddText(drawList, font, size, position, color, text);
     }
 
     private static uint ColorU32(float[] color, float alpha)
