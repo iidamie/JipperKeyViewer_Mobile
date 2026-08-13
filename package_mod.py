@@ -36,7 +36,7 @@ def main() -> int:
     mod_dir.mkdir(parents=True)
 
     shutil.copy2(dll, mod_dir / f"{MOD_ID}.dll")
-    license_path = ROOT.parent / "LICENSE.txt"
+    license_path = ROOT / "LICENSE.txt"
     if license_path.is_file():
         shutil.copy2(license_path, mod_dir / "LICENSE.txt")
 

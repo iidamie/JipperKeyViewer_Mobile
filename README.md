@@ -14,6 +14,9 @@ Implemented mobile features:
 - external keyboard polling through ImGui key events
 - per-key count, optional per-key KPS, global KPS, total count, and count formatting
 - configurable position, scale, key gap, bindings, labels, colors, and touch debug outlines
+- full appearance controls: MapleStory, ImGui default, or `CustomFont/*.ttf` / `.otf` keyboard fonts;
+  normalized position; independent key width, height, and text sizes; KPS/Total labels and layouts
+- global, pressed, per-key, KPS, Total, and rain colors with live ImGui color editors
 - lightweight ImGui rain effect with configurable speed, height, length, width, and release fade
 - the original PC MapleStory OTF embedded for keyboard labels, counters, and KPS status
 - gameplay-only visibility using the `scrController` runtime facade
@@ -30,7 +33,7 @@ positioned freely.
 ## Build
 
 The project uses .NET 10 and the same reference layout as the existing mobile mods. In this
-workspace the default reference path points at `../../../YoonKeyViewer_Mobile/References` from the
+workspace the default reference path points at `../../YoonKeyViewer_Mobile/References` from the
 project file's directory. For another checkout, pass the references explicitly:
 
 ```bash
@@ -68,5 +71,5 @@ projects remain unchanged and continue to provide the UnityModManager and MelonL
 
 The mobile port currently uses ImGui primitives instead of the PC sprite/AssetBundle/TMP renderer.
 The 108-key full keyboard, foot-layout variants beyond the mobile touch row, profiles, ghost rain,
-custom font selection, and the PC per-row rain controls are not included in this first port. They can be
+and the PC per-row rain controls are not included in this port. They can be
 added without changing the Starry entry point or touch state machine.

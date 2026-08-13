@@ -40,8 +40,8 @@ internal static class KeyViewerLayout
         int rowCount = mainRows + (footCount > 0 ? 1 : 0) + statusRows;
 
         float scale = Math.Clamp(settings.Scale, 0.45f, 2f);
-        float keyWidth = 50f * scale;
-        float keyHeight = 50f * scale;
+        float keyWidth = Math.Clamp(settings.KeyWidth, 24f, 160f) * scale;
+        float keyHeight = Math.Clamp(settings.KeyHeight, 24f, 160f) * scale;
         float gap = Math.Clamp(settings.KeyGap, 1f, 12f) * scale;
         float keyboardWidth = keyWidth * 8f + gap * 7f;
         float availableWidth = Math.Max(160f, display.X - 16f);

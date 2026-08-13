@@ -11,7 +11,7 @@ namespace JipperKeyViewer.Mobile;
 /// </summary>
 internal static unsafe class KeyViewerFontRuntime
 {
-    private const string ResourceName =
+    private const string MapleResourceName =
         "JipperKeyViewer.Mobile.Assets.MAPLESTORY_OTF_BOLD.OTF";
     private const float RasterSize = 48f;
 
@@ -21,8 +21,12 @@ internal static unsafe class KeyViewerFontRuntime
     private static IntPtr _failedContext;
     private static uint _texture;
     private static bool _ready;
+    private static KeyViewerFont _fontKind;
+    private static string _fontFile = string.Empty;
+    private static KeyViewerFont _failedKind;
+    private static string _failedFile = string.Empty;
 
-    internal static ImFontPtr GetFont()
+    internal static ImFontPtr GetFont(KeyViewerSettings settings, string modDirectory)
     {
         ImFontPtr fallback = ImGui.GetFont();
         IntPtr context;
@@ -30,24 +34,37 @@ internal static unsafe class KeyViewerFontRuntime
         catch { return fallback; }
         if (context == IntPtr.Zero) return fallback;
 
-        if (_ready && _context == context && _font.NativePtr != null)
+        string customPath = ResolveCustomFontPath(settings, modDirectory);
+        if (_ready && _context == context && _font.NativePtr != null
+            && _fontKind == settings.Font && string.Equals(_fontFile, customPath, StringComparison.OrdinalIgnoreCase))
             return _font;
 
         if (_ready)
         {
             // A changed ImGui context can belong to a replaced EGL context.
-            // Do not delete a stale texture name from the new GL context.
-            Release(deleteTexture: false);
+            // Only delete a texture name while its owning GL context is current.
+            Release(deleteTexture: _context == context);
         }
 
-        if (_failedContext == context)
+        if (_failedContext == context && _failedKind == settings.Font
+            && string.Equals(_failedFile, customPath, StringComparison.OrdinalIgnoreCase))
             return fallback;
 
-        if (TryCreate(context, out string? error))
+        if (settings.Font == KeyViewerFont.ImGuiDefault)
+        {
+            _failedContext = context;
+            _failedKind = settings.Font;
+            _failedFile = customPath;
+            return fallback;
+        }
+
+        if (TryCreate(context, settings.Font, customPath, out string? error))
             return _font;
 
         _failedContext = context;
-        PluginLog.Warn($"MapleStory keyboard font unavailable; using ImGui fallback: {error}");
+        _failedKind = settings.Font;
+        _failedFile = customPath;
+        PluginLog.Warn($"Keyboard font unavailable; using ImGui fallback: {error}");
         return fallback;
     }
 
@@ -80,16 +97,40 @@ internal static unsafe class KeyViewerFontRuntime
     {
         Release(deleteTexture: true);
         _failedContext = IntPtr.Zero;
+        _failedKind = default;
+        _failedFile = string.Empty;
     }
 
-    private static bool TryCreate(IntPtr context, out string? error)
+    internal static string[] ListCustomFonts(string modDirectory)
+    {
+        string directory = Path.Combine(modDirectory, "CustomFont");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            return Directory.EnumerateFiles(directory)
+                .Where(path => Path.GetExtension(path).Equals(".ttf", StringComparison.OrdinalIgnoreCase)
+                    || Path.GetExtension(path).Equals(".otf", StringComparison.OrdinalIgnoreCase))
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .Cast<string>()
+                .ToArray();
+        }
+        catch (Exception exception)
+        {
+            PluginLog.Warn($"Custom font scan failed: {exception.Message}");
+            return Array.Empty<string>();
+        }
+    }
+
+    private static bool TryCreate(IntPtr context, KeyViewerFont kind, string customPath, out string? error)
     {
         ImFontAtlasPtr atlas = default;
         ImFontPtr font = default;
         uint texture = 0;
         try
         {
-            byte[] fontBytes = ReadFontBytes();
+            byte[] fontBytes = ReadFontBytes(kind, customPath);
             atlas = new ImFontAtlasPtr(ImGuiNative.ImFontAtlas_ImFontAtlas());
             if (atlas.NativePtr == null)
                 throw new InvalidOperationException("ImFontAtlas allocation failed");
@@ -135,8 +176,12 @@ internal static unsafe class KeyViewerFontRuntime
             _font = font;
             _texture = texture;
             _context = context;
+            _fontKind = kind;
+            _fontFile = customPath;
             _ready = true;
             _failedContext = IntPtr.Zero;
+            _failedKind = default;
+            _failedFile = string.Empty;
             error = null;
             return true;
         }
@@ -151,14 +196,35 @@ internal static unsafe class KeyViewerFontRuntime
         }
     }
 
-    private static byte[] ReadFontBytes()
+    private static byte[] ReadFontBytes(KeyViewerFont kind, string customPath)
     {
-        Assembly assembly = typeof(KeyViewerFontRuntime).Assembly;
-        using Stream stream = assembly.GetManifestResourceStream(ResourceName)
-            ?? throw new InvalidOperationException("embedded MAPLESTORY_OTF_BOLD.OTF was not found");
-        var bytes = new byte[checked((int)stream.Length)];
-        stream.ReadExactly(bytes);
-        return bytes;
+        Stream stream;
+        if (kind == KeyViewerFont.Custom)
+        {
+            if (string.IsNullOrWhiteSpace(customPath) || !File.Exists(customPath))
+                throw new InvalidOperationException("selected custom font file was not found");
+            stream = File.OpenRead(customPath);
+        }
+        else
+        {
+            Assembly assembly = typeof(KeyViewerFontRuntime).Assembly;
+            stream = assembly.GetManifestResourceStream(MapleResourceName)
+                ?? throw new InvalidOperationException("embedded MAPLESTORY_OTF_BOLD.OTF was not found");
+        }
+        using (stream)
+        {
+            var bytes = new byte[checked((int)stream.Length)];
+            stream.ReadExactly(bytes);
+            return bytes;
+        }
+    }
+
+    private static string ResolveCustomFontPath(KeyViewerSettings settings, string modDirectory)
+    {
+        if (settings.Font != KeyViewerFont.Custom) return string.Empty;
+        string file = Path.GetFileName(settings.CustomFontFile ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(file)) return string.Empty;
+        return Path.Combine(modDirectory, "CustomFont", file);
     }
 
     private static uint UploadTexture(IntPtr pixels, int width, int height)
@@ -238,6 +304,8 @@ internal static unsafe class KeyViewerFontRuntime
         _font = default;
         _context = IntPtr.Zero;
         _texture = 0;
+        _fontKind = KeyViewerFont.MapleStory;
+        _fontFile = string.Empty;
         _ready = false;
     }
 

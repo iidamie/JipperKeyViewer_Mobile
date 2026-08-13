@@ -10,7 +10,7 @@ using StArray.ModManager.Runtime;
 
 namespace JipperKeyViewer.Mobile;
 
-public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
+public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
 {
     private const string LogTag = "JipperKeyViewer";
     private readonly SettingsStore _settingsStore;
@@ -26,6 +26,9 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
     private long _nextCountSaveTicks;
     private string _notice = string.Empty;
     private DateTime _noticeUntilUtc;
+    private int _appearanceKeyIndex;
+    private bool _appearanceKeyFoot;
+    private string[] _customFonts = Array.Empty<string>();
 
     public JipperKeyViewerPlugin()
     {
@@ -36,12 +39,13 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
     }
 
     public KeyViewerSettings Settings { get; private set; }
+    internal string ModDirectory => _modDirectory;
     internal GameApi? Game => _game;
     internal bool IsLoaded => _loaded;
 
     public string Id => "JipperKeyViewer";
     public string Name => "Jipper Key Viewer Mobile";
-    public string Version => "1.6.5-mobile.18";
+    public string Version => "1.7.0-mobile.19";
     public string Author => "HitMargin / mobile port";
     public string Description => "Jipper Key Viewer touch and keyboard overlay for ADOFAI Android";
     public IReadOnlyList<string> Dependencies => Array.Empty<string>();
@@ -58,6 +62,10 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
         _lastSavedTotalCount = Settings.TotalCount;
         _nextCountSaveTicks = 0;
         _updateService = new GitHubUpdateService(_modDirectory, Version);
+        _customFonts = KeyViewerFontRuntime.ListCustomFonts(_modDirectory);
+        if (Settings.Font == KeyViewerFont.Custom && string.IsNullOrWhiteSpace(Settings.CustomFontFile)
+            && _customFonts.Length > 0)
+            Settings.CustomFontFile = _customFonts[0];
         _updateService.StartAutomaticCheck();
         InputEvents.OnTouch += OnTouch;
         TryResolveGame();
@@ -179,6 +187,8 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
                 DrawGeneralSettingsTab();
                 DrawLayoutSettingsTab();
                 DrawRainSettingsTab();
+                DrawAppearanceSettingsTab();
+                DrawColorSettingsTab();
                 DrawKeyBindingsTab();
                 DrawUpdateTab();
                 ImGui.EndTabBar();
@@ -224,6 +234,8 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
         ImGui.Separator();
         ImGui.SliderFloat("Scale", ref Settings.Scale, 0.45f, 2f, "%.2f");
+        ImGui.SliderFloat("Key width", ref Settings.KeyWidth, 24f, 160f, "%.1f px");
+        ImGui.SliderFloat("Key height", ref Settings.KeyHeight, 24f, 160f, "%.1f px");
         ImGui.SliderFloat("Horizontal position", ref Settings.PositionX, 0f, 1f, "%.2f");
         ImGui.SliderFloat("Vertical position", ref Settings.PositionY, 0f, 1f, "%.2f");
         ImGui.SliderFloat("Key gap", ref Settings.KeyGap, 1f, 12f, "%.1f");
@@ -252,6 +264,203 @@ public sealed class JipperKeyViewerPlugin : IModPlugin, IModSettings
             ImGui.SliderFloat("Rain width", ref Settings.RainWidth, 0.1f, 2f, "%.2fx key");
         }
         ImGui.EndTabItem();
+    }
+
+    private void DrawAppearanceSettingsTab()
+    {
+        if (!ImGui.BeginTabItem("Appearance"))
+            return;
+
+        string[] fontNames = { "MapleStory", "ImGui default", "Custom file" };
+        int font = (int)Settings.Font;
+        if (ImGui.Combo("Font", ref font, fontNames, fontNames.Length))
+        {
+            Settings.Font = (KeyViewerFont)font;
+            KeyViewerFontRuntime.Reset();
+        }
+
+        if (Settings.Font == KeyViewerFont.Custom)
+        {
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Refresh##jipper-font-refresh"))
+            {
+                _customFonts = KeyViewerFontRuntime.ListCustomFonts(_modDirectory);
+                KeyViewerFontRuntime.Reset();
+            }
+
+            if (_customFonts.Length == 0)
+            {
+                ImGui.TextDisabled("No .ttf/.otf files in CustomFont");
+            }
+            else
+            {
+                int selected = Array.FindIndex(_customFonts, value =>
+                    value.Equals(Settings.CustomFontFile, StringComparison.OrdinalIgnoreCase));
+                if (selected < 0) selected = 0;
+                string preview = _customFonts[selected];
+                if (ImGui.BeginCombo("Custom font file", preview))
+                {
+                    for (int i = 0; i < _customFonts.Length; i++)
+                    {
+                        bool isSelected = i == selected;
+                        if (ImGui.Selectable(_customFonts[i], isSelected))
+                        {
+                            Settings.CustomFontFile = _customFonts[i];
+                            KeyViewerFontRuntime.Reset();
+                        }
+                        if (isSelected) ImGui.SetItemDefaultFocus();
+                    }
+                    ImGui.EndCombo();
+                }
+            }
+            if (_customFonts.Length > 0 && string.IsNullOrWhiteSpace(Settings.CustomFontFile))
+            {
+                Settings.CustomFontFile = _customFonts[0];
+                KeyViewerFontRuntime.Reset();
+            }
+        }
+
+        ImGui.SliderFloat("Key label size", ref Settings.KeyFontSize, 8f, 72f, "%.1f px");
+        ImGui.SliderFloat("KPS label/value size", ref Settings.KpsFontSize, 8f, 72f, "%.1f px");
+        ImGui.SliderFloat("Total label/value size", ref Settings.TotalFontSize, 8f, 72f, "%.1f px");
+        ImGui.Checkbox("Per-key label size", ref Settings.EnablePerKeyTextSize);
+        if (Settings.EnablePerKeyTextSize)
+        {
+            DrawAppearanceKeySelector();
+            int slot = AppearanceSlot();
+            if (slot >= 0 && slot < Settings.PerKeyFontSize.Length)
+            {
+                float value = Settings.PerKeyFontSize[slot];
+                if (ImGui.SliderFloat("Selected key size (0 = global)", ref value, 0f, 72f, "%.1f px"))
+                    Settings.PerKeyFontSize[slot] = value;
+            }
+        }
+
+        ImGui.InputText("KPS label", ref Settings.KpsLabel, 32);
+        ImGui.InputText("Total label", ref Settings.TotalLabel, 32);
+        ImGui.Checkbox("Hide KPS/Total labels", ref Settings.HideKpsTotalLabel);
+        if (!Settings.HideKpsTotalLabel)
+        {
+            ImGui.Checkbox("Center KPS/Total text", ref Settings.KpsTotalCentered);
+            if (Settings.KpsTotalCentered)
+                ImGui.Checkbox("Stack label above value", ref Settings.KpsTotalStacked);
+        }
+        ImGui.EndTabItem();
+    }
+
+    private void DrawColorSettingsTab()
+    {
+        if (!ImGui.BeginTabItem("Colors"))
+            return;
+
+        DrawColor("Key background", Settings.Background);
+        DrawColor("Key background (pressed)", Settings.BackgroundPressed);
+        DrawColor("Key outline", Settings.Outline);
+        DrawColor("Key outline (pressed)", Settings.OutlinePressed);
+        DrawColor("Key text", Settings.Text);
+        DrawColor("Key text (pressed)", Settings.TextPressed);
+        DrawColor("Rain", Settings.RainColor);
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("KPS");
+        DrawColor("KPS background", Settings.KpsBackground);
+        DrawColor("KPS outline", Settings.KpsOutline);
+        DrawColor("KPS text", Settings.KpsText);
+        ImGui.TextUnformatted("Total");
+        DrawColor("Total background", Settings.TotalBackground);
+        DrawColor("Total outline", Settings.TotalOutline);
+        DrawColor("Total text", Settings.TotalText);
+
+        ImGui.Separator();
+        ImGui.Checkbox("Per-key colors", ref Settings.EnablePerKeyColors);
+        if (Settings.EnablePerKeyColors)
+        {
+            DrawAppearanceKeySelector();
+            int slot = AppearanceSlot();
+            if (slot >= 0 && slot < Settings.PerKeyBackground.Length)
+            {
+                DrawColor("Selected background", Settings.PerKeyBackground[slot]);
+                DrawColor("Selected background (pressed)", Settings.PerKeyBackgroundPressed[slot]);
+                DrawColor("Selected outline", Settings.PerKeyOutline[slot]);
+                DrawColor("Selected outline (pressed)", Settings.PerKeyOutlinePressed[slot]);
+                DrawColor("Selected text", Settings.PerKeyText[slot]);
+                DrawColor("Selected text (pressed)", Settings.PerKeyTextPressed[slot]);
+                DrawColor("Selected rain", Settings.PerKeyRainColor[slot]);
+            }
+        }
+        ImGui.EndTabItem();
+    }
+
+    private void DrawAppearanceKeySelector()
+    {
+        string[] names = Settings.CurrentBindings;
+        int count = _appearanceKeyFoot ? Settings.FootBindings.Length : names.Length;
+        if (count == 0)
+        {
+            ImGui.TextDisabled("No foot keys in this layout");
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Main keys##appearance-key-kind"))
+            {
+                _appearanceKeyFoot = false;
+                _appearanceKeyIndex = 0;
+            }
+            return;
+        }
+        _appearanceKeyIndex = Math.Clamp(_appearanceKeyIndex, 0, Math.Max(0, count - 1));
+        string selected = _appearanceKeyFoot
+            ? $"Foot {Settings.FootBindings[_appearanceKeyIndex]}"
+            : PrettyBindingName(names[_appearanceKeyIndex]);
+        if (ImGui.BeginCombo("Selected key", selected))
+        {
+            for (int i = 0; i < count; i++)
+            {
+                string label = _appearanceKeyFoot
+                    ? $"Foot {Settings.FootBindings[i]}"
+                    : PrettyBindingName(names[i]);
+                bool isSelected = i == _appearanceKeyIndex;
+                if (ImGui.Selectable(label, isSelected)) _appearanceKeyIndex = i;
+                if (isSelected) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton(_appearanceKeyFoot ? "Main keys##appearance-key-kind" : "Foot keys##appearance-key-kind"))
+        {
+            _appearanceKeyFoot = !_appearanceKeyFoot;
+            _appearanceKeyIndex = 0;
+        }
+    }
+
+    private int AppearanceSlot()
+        => _appearanceKeyFoot && Settings.FootBindings.Length == 0
+            ? -1
+            : _appearanceKeyFoot ? 24 + _appearanceKeyIndex : _appearanceKeyIndex;
+
+    private static string PrettyBindingName(string binding)
+        => string.IsNullOrWhiteSpace(binding) ? "-" : binding switch
+        {
+            "Backspace" => "Back",
+            "CapsLock" => "Caps",
+            "LeftShift" => "LShift",
+            "RightShift" => "RShift",
+            "LeftCtrl" => "LCtrl",
+            "RightCtrl" => "RCtrl",
+            "Equal" => "=",
+            "Comma" => ",",
+            "Period" => ".",
+            _ when binding.StartsWith('_') && binding.Length == 2 => binding[1..],
+            _ => binding,
+        };
+
+    private static void DrawColor(string label, float[] value)
+    {
+        if (value == null || value.Length < 4) return;
+        var color = new Vector4(value[0], value[1], value[2], value[3]);
+        if (!ImGui.ColorEdit4(label, ref color, ImGuiColorEditFlags.AlphaBar)) return;
+        value[0] = Math.Clamp(color.X, 0f, 1f);
+        value[1] = Math.Clamp(color.Y, 0f, 1f);
+        value[2] = Math.Clamp(color.Z, 0f, 1f);
+        value[3] = Math.Clamp(color.W, 0f, 1f);
     }
 
     private void DrawKeyBindingsTab()

@@ -231,7 +231,7 @@ internal static class KeyViewerRuntime
         if (Geometry.Count == 0) return;
 
         DrawRain(settings, drawList);
-        ImFontPtr font = KeyViewerFontRuntime.GetFont();
+        ImFontPtr font = KeyViewerFontRuntime.GetFont(settings, plugin.ModDirectory);
         foreach (KeyRect rect in Geometry)
             DrawKey(settings, rect, font, drawList);
 
@@ -597,7 +597,7 @@ internal static class KeyViewerRuntime
             {
                 Vector2 solidMin = new(x, rect.Min.Y - solidFar);
                 Vector2 solidMax = new(x + width, rect.Min.Y - nearDistance);
-                drawList.AddRectFilled(solidMin, solidMax, ColorU32(settings.RainColor, 1f));
+                drawList.AddRectFilled(solidMin, solidMax, ColorU32(GetRainColor(settings, drop), 1f));
             }
 
             float fadeNear = Math.Max(nearDistance, maxHeight);
@@ -610,10 +610,10 @@ internal static class KeyViewerRuntime
             drawList.AddRectFilledMultiColor(
                 fadeMin,
                 fadeMax,
-                ColorU32(settings.RainColor, topAlpha),
-                ColorU32(settings.RainColor, topAlpha),
-                ColorU32(settings.RainColor, bottomAlpha),
-                ColorU32(settings.RainColor, bottomAlpha));
+                ColorU32(GetRainColor(settings, drop), topAlpha),
+                ColorU32(GetRainColor(settings, drop), topAlpha),
+                ColorU32(GetRainColor(settings, drop), bottomAlpha),
+                ColorU32(GetRainColor(settings, drop), bottomAlpha));
         }
     }
 
@@ -629,9 +629,10 @@ internal static class KeyViewerRuntime
     private static void DrawKey(KeyViewerSettings settings, KeyRect rect, ImFontPtr font, ImDrawListPtr drawList)
     {
         bool pressed = rect.Foot ? FootPressed[rect.Index] : MainPressed[rect.Index];
-        uint background = ColorU32(pressed ? settings.BackgroundPressed : settings.Background, 1f);
-        uint outline = ColorU32(pressed ? settings.OutlinePressed : settings.Outline, 1f);
-        uint textColor = ColorU32(pressed ? settings.TextPressed : settings.Text, 1f);
+        int slot = SlotIndex(rect.Index, rect.Foot);
+        uint background = ColorU32(GetKeyColor(settings, slot, pressed, ColorRole.Background), 1f);
+        uint outline = ColorU32(GetKeyColor(settings, slot, pressed, ColorRole.Outline), 1f);
+        uint textColor = ColorU32(GetKeyColor(settings, slot, pressed, ColorRole.Text), 1f);
         float rounding = Math.Min(6f, (rect.Max.Y - rect.Min.Y) * 0.12f);
         drawList.AddRectFilled(rect.Min, rect.Max, background, rounding);
         drawList.AddRect(rect.Min, rect.Max, outline, rounding, ImDrawFlags.None, pressed ? 2f : 1.5f);
@@ -639,7 +640,11 @@ internal static class KeyViewerRuntime
         string label = GetLabel(settings, rect);
         float height = rect.Max.Y - rect.Min.Y;
         float width = rect.Max.X - rect.Min.X;
-        float fontSize = Math.Clamp(height * 0.38f, 12f, 30f);
+        float fontSize = settings.KeyFontSize;
+        if (settings.EnablePerKeyTextSize && slot < settings.PerKeyFontSize.Length
+            && settings.PerKeyFontSize[slot] > 0f)
+            fontSize = settings.PerKeyFontSize[slot];
+        fontSize = Math.Clamp(fontSize, 8f, 72f);
         float textWidth = Math.Max(8f, width - 4f);
         fontSize = FitFontSize(font, label, fontSize, textWidth, 8f);
         label = FitText(font, label, fontSize, textWidth);
@@ -650,11 +655,10 @@ internal static class KeyViewerRuntime
         AddTextShadow(drawList, font, fontSize, labelPosition, textColor, label);
 
         if (!settings.ShowMainKeyCount) return;
-        int slot = SlotIndex(rect.Index, rect.Foot);
         string value = settings.ShowPerKeyKps
             ? SlotPressTimes[slot].Count.ToString(CultureInfo.InvariantCulture)
             : FormatCount(settings.Counts[slot], settings.EnableCountFormatting);
-        float valueSize = Math.Clamp(fontSize * 0.54f, 9f, 16f);
+        float valueSize = Math.Clamp(fontSize * 0.54f, 8f, 40f);
         valueSize = FitFontSize(font, value, valueSize, textWidth, 7f);
         value = FitText(font, value, valueSize, textWidth);
         Vector2 valueMeasure = font.CalcTextSizeA(valueSize, float.MaxValue, 0f, value);
@@ -670,23 +674,41 @@ internal static class KeyViewerRuntime
         ImFontPtr font,
         ImDrawListPtr drawList)
     {
-        uint background = ColorU32(settings.Background, 1f);
-        uint outline = ColorU32(settings.Outline, 1f);
-        uint textColor = ColorU32(settings.Text, 1f);
+        float[] backgroundColor = rect.Total ? settings.TotalBackground : settings.KpsBackground;
+        float[] outlineColor = rect.Total ? settings.TotalOutline : settings.KpsOutline;
+        float[] textColorArray = rect.Total ? settings.TotalText : settings.KpsText;
+        uint background = ColorU32(backgroundColor, 1f);
+        uint outline = ColorU32(outlineColor, 1f);
+        uint textColor = ColorU32(textColorArray, 1f);
         float height = rect.Max.Y - rect.Min.Y;
         float width = rect.Max.X - rect.Min.X;
         float rounding = Math.Min(6f, height * 0.12f);
         drawList.AddRectFilled(rect.Min, rect.Max, background, rounding);
         drawList.AddRect(rect.Min, rect.Max, outline, rounding, ImDrawFlags.None, 1.5f);
 
-        string label = rect.Total ? "Total" : "KPS";
+        string label = rect.Total ? settings.TotalLabel : settings.KpsLabel;
         string value = rect.Total
             ? FormatCount(settings.TotalCount, settings.EnableCountFormatting)
             : _kps.ToString(CultureInfo.InvariantCulture);
         float padding = Math.Max(4f, height * 0.12f);
-        float textSize = Math.Clamp(height * 0.32f, 10f, 24f);
-        float labelWidth = Math.Max(8f, width * 0.45f - padding);
-        float valueWidth = Math.Max(8f, width * 0.52f - padding);
+        float textSize = Math.Clamp(rect.Total ? settings.TotalFontSize : settings.KpsFontSize, 8f, 72f);
+        if (settings.HideKpsTotalLabel)
+        {
+            float hiddenValueWidth = Math.Max(8f, width - padding * 2f);
+            float hiddenValueSize = FitFontSize(font, value, textSize, hiddenValueWidth, 8f);
+            value = FitText(font, value, hiddenValueSize, hiddenValueWidth);
+            Vector2 hiddenValueMeasure = font.CalcTextSizeA(hiddenValueSize, float.MaxValue, 0f, value);
+            Vector2 hiddenValuePosition = new(
+                rect.Min.X + (width - hiddenValueMeasure.X) * 0.5f,
+                rect.Min.Y + (height - hiddenValueMeasure.Y) * 0.5f);
+            AddTextShadow(drawList, font, hiddenValueSize, hiddenValuePosition, textColor, value);
+            return;
+        }
+
+        bool stacked = settings.KpsTotalCentered && settings.KpsTotalStacked;
+        bool centered = settings.KpsTotalCentered;
+        float labelWidth = centered ? Math.Max(8f, width - padding * 2f) : Math.Max(8f, width * 0.45f - padding);
+        float valueWidth = centered ? Math.Max(8f, width - padding * 2f) : Math.Max(8f, width * 0.52f - padding);
         float labelSize = FitFontSize(font, label, textSize, labelWidth, 8f);
         float valueSize = FitFontSize(font, value, textSize, valueWidth, 8f);
         label = FitText(font, label, labelSize, labelWidth);
@@ -695,18 +717,40 @@ internal static class KeyViewerRuntime
         Vector2 valueMeasure = font.CalcTextSizeA(valueSize, float.MaxValue, 0f, value);
         float labelY = rect.Min.Y + (height - labelMeasure.Y) * 0.5f;
         float valueY = rect.Min.Y + (height - valueMeasure.Y) * 0.5f;
+        Vector2 labelPosition;
+        Vector2 valuePosition;
+        if (stacked)
+        {
+            float gap = Math.Max(1f, height * 0.04f);
+            float combinedHeight = labelMeasure.Y + gap + valueMeasure.Y;
+            float top = rect.Min.Y + (height - combinedHeight) * 0.5f;
+            labelPosition = new Vector2(rect.Min.X + (width - labelMeasure.X) * 0.5f, top);
+            valuePosition = new Vector2(rect.Min.X + (width - valueMeasure.X) * 0.5f, top + labelMeasure.Y + gap);
+        }
+        else if (centered)
+        {
+            float combinedWidth = labelMeasure.X + Math.Max(4f, width * 0.04f) + valueMeasure.X;
+            float left = rect.Min.X + (width - combinedWidth) * 0.5f;
+            labelPosition = new Vector2(left, labelY);
+            valuePosition = new Vector2(left + labelMeasure.X + Math.Max(4f, width * 0.04f), valueY);
+        }
+        else
+        {
+            labelPosition = new Vector2(rect.Min.X + padding, labelY);
+            valuePosition = new Vector2(rect.Max.X - padding - valueMeasure.X, valueY);
+        }
         AddTextShadow(
             drawList,
             font,
             labelSize,
-            new Vector2(rect.Min.X + padding, labelY),
+            labelPosition,
             textColor,
             label);
         AddTextShadow(
             drawList,
             font,
             valueSize,
-            new Vector2(rect.Max.X - padding - valueMeasure.X, valueY),
+            valuePosition,
             textColor,
             value);
     }
@@ -792,7 +836,7 @@ internal static class KeyViewerRuntime
         string status = plugin.Game == null
             ? "Touch preview: waiting for ADOFAI runtime"
             : "Touch preview: enter gameplay to enable input";
-        ImFontPtr font = KeyViewerFontRuntime.GetFont();
+        ImFontPtr font = KeyViewerFontRuntime.GetFont(plugin.Settings, plugin.ModDirectory);
         KeyViewerFontRuntime.AddText(
             drawList,
             font,
@@ -926,6 +970,43 @@ internal static class KeyViewerRuntime
         => format ? value.ToString("N0", CultureInfo.InvariantCulture) : value.ToString(CultureInfo.InvariantCulture);
 
     private static int SlotIndex(int index, bool foot) => foot ? MaxMainKeys + index : index;
+
+    private enum ColorRole
+    {
+        Background,
+        Outline,
+        Text,
+    }
+
+    private static float[] GetKeyColor(KeyViewerSettings settings, int slot, bool pressed, ColorRole role)
+    {
+        if (settings.EnablePerKeyColors && slot >= 0 && slot < settings.PerKeyBackground.Length)
+        {
+            float[][] values = role switch
+            {
+                ColorRole.Background => pressed ? settings.PerKeyBackgroundPressed : settings.PerKeyBackground,
+                ColorRole.Outline => pressed ? settings.PerKeyOutlinePressed : settings.PerKeyOutline,
+                _ => pressed ? settings.PerKeyTextPressed : settings.PerKeyText,
+            };
+            if (slot < values.Length && values[slot] is { Length: >= 4 } value)
+                return value;
+        }
+
+        return role switch
+        {
+            ColorRole.Background => pressed ? settings.BackgroundPressed : settings.Background,
+            ColorRole.Outline => pressed ? settings.OutlinePressed : settings.Outline,
+            _ => pressed ? settings.TextPressed : settings.Text,
+        };
+    }
+
+    private static float[] GetRainColor(KeyViewerSettings settings, RainDrop drop)
+    {
+        int slot = SlotIndex(drop.Index, drop.Foot);
+        return settings.EnablePerKeyColors && slot >= 0 && slot < settings.PerKeyRainColor.Length
+            && settings.PerKeyRainColor[slot] is { Length: >= 4 } value
+            ? value : settings.RainColor;
+    }
 
     private static Queue<float>[] CreateSlotQueues()
     {
