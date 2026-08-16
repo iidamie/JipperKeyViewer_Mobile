@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace JipperKeyViewer.Mobile;
 
@@ -21,8 +22,68 @@ public enum KeyViewerFont
     Custom,
 }
 
+public enum FootKeyPlacement
+{
+    AboveKpsTotal,
+    BetweenKpsAndTotal,
+    Custom,
+}
+
+/// <summary>
+/// Four-corner RGBA color used by the overlay's optional gradient renderer.
+/// The legacy flat color remains the fallback, so old settings files stay valid.
+/// </summary>
+public sealed class KeyViewerColorGradient
+{
+    public bool Enabled;
+    public float[] TopLeft = Array.Empty<float>();
+    public float[] TopRight = Array.Empty<float>();
+    public float[] BottomLeft = Array.Empty<float>();
+    public float[] BottomRight = Array.Empty<float>();
+
+    internal void Normalize(float[] fallback)
+    {
+        TopLeft = NormalizeCorner(TopLeft, fallback);
+        TopRight = NormalizeCorner(TopRight, fallback);
+        BottomLeft = NormalizeCorner(BottomLeft, fallback);
+        BottomRight = NormalizeCorner(BottomRight, fallback);
+        if (!Enabled)
+            SetFlat(fallback);
+    }
+
+    internal void SetFlat(float[] color)
+    {
+        TopLeft = CopyCorner(TopLeft, color);
+        TopRight = CopyCorner(TopRight, color);
+        BottomLeft = CopyCorner(BottomLeft, color);
+        BottomRight = CopyCorner(BottomRight, color);
+    }
+
+    private static float[] NormalizeCorner(float[]? source, float[] fallback)
+    {
+        float[] result = source is { Length: >= 4 } ? source : fallback.ToArray();
+        for (int i = 0; i < 4; i++)
+        {
+            float value = result[i];
+            result[i] = float.IsFinite(value)
+                ? Math.Clamp(value, 0f, 1f)
+                : fallback[i];
+        }
+        return result;
+    }
+
+    private static float[] CopyCorner(float[]? target, float[] source)
+    {
+        float[] result = target is { Length: >= 4 } ? target : new float[4];
+        for (int i = 0; i < 4; i++)
+            result[i] = i < source.Length ? Math.Clamp(source[i], 0f, 1f) : 1f;
+        return result;
+    }
+}
+
 public sealed class KeyViewerSettings
 {
+    private const int SlotCount = 40;
     private static readonly float[] DefaultBackground = { 0.56f, 0.235f, 1f, 0.20f };
     private static readonly float[] DefaultBackgroundPressed = { 1f, 1f, 1f, 0.90f };
     private static readonly float[] DefaultOutline = { 0.55f, 0.24f, 1f, 1f };
@@ -35,7 +96,9 @@ public sealed class KeyViewerSettings
     public bool Enabled = true;
     public bool ShowOnlyInGameplay = true;
     public bool TouchInputEnabled = true;
-    public bool KeyboardInputEnabled = true;
+    // Hardware keyboards are optional on mobile. Keep their input path dormant
+    // until the user explicitly enables it.
+    public bool KeyboardInputEnabled;
     public bool ShowTouchRegions;
     public bool TouchFootAreaEnabled = true;
     public float TouchFootAreaHeight = 0.18f;
@@ -63,7 +126,7 @@ public sealed class KeyViewerSettings
     public float KpsFontSize = 18f;
     public float TotalFontSize = 18f;
     public bool EnablePerKeyTextSize;
-    public float[] PerKeyFontSize = new float[32];
+    public float[] PerKeyFontSize = new float[SlotCount];
     public float PositionX = 0.5f;
     public float PositionY = 0.03f;
     public float KeyGap = 4f;
@@ -72,8 +135,13 @@ public sealed class KeyViewerSettings
     public string[] KeyLabels = new string[16];
     public string[] FootBindings = { "F8", "F3", "F7", "F2" };
     public string[] FootLabels = new string[4];
-    public int[] Counts = new int[32];
-    public int TotalCount;
+    public FootKeyPlacement FootPlacement = FootKeyPlacement.AboveKpsTotal;
+    public float FootPositionX = 0.5f;
+    public float FootPositionY = 0.82f;
+    // Counts have their own durable snapshot. Keeping them out of settings.json
+    // prevents ModManager's generic settings loader from restoring stale values.
+    [JsonIgnore] public int[] Counts = new int[SlotCount];
+    [JsonIgnore] public int TotalCount;
 
     public float[] Background = { 0.56f, 0.235f, 1f, 0.20f };
     public float[] BackgroundPressed = { 1f, 1f, 1f, 0.90f };
@@ -96,6 +164,26 @@ public sealed class KeyViewerSettings
     public float[][] PerKeyText = CreateColorArray(DefaultText);
     public float[][] PerKeyTextPressed = CreateColorArray(DefaultTextPressed);
     public float[][] PerKeyRainColor = CreateColorArray(DefaultRainColor);
+    public KeyViewerColorGradient BackgroundGradient = new();
+    public KeyViewerColorGradient BackgroundPressedGradient = new();
+    public KeyViewerColorGradient OutlineGradient = new();
+    public KeyViewerColorGradient OutlinePressedGradient = new();
+    public KeyViewerColorGradient TextGradient = new();
+    public KeyViewerColorGradient TextPressedGradient = new();
+    public KeyViewerColorGradient RainGradient = new();
+    public KeyViewerColorGradient KpsBackgroundGradient = new();
+    public KeyViewerColorGradient KpsOutlineGradient = new();
+    public KeyViewerColorGradient KpsTextGradient = new();
+    public KeyViewerColorGradient TotalBackgroundGradient = new();
+    public KeyViewerColorGradient TotalOutlineGradient = new();
+    public KeyViewerColorGradient TotalTextGradient = new();
+    public KeyViewerColorGradient[] PerKeyBackgroundGradients = CreateGradientArray();
+    public KeyViewerColorGradient[] PerKeyBackgroundPressedGradients = CreateGradientArray();
+    public KeyViewerColorGradient[] PerKeyOutlineGradients = CreateGradientArray();
+    public KeyViewerColorGradient[] PerKeyOutlinePressedGradients = CreateGradientArray();
+    public KeyViewerColorGradient[] PerKeyTextGradients = CreateGradientArray();
+    public KeyViewerColorGradient[] PerKeyTextPressedGradients = CreateGradientArray();
+    public KeyViewerColorGradient[] PerKeyRainGradients = CreateGradientArray();
     public KeyViewerFont Font = KeyViewerFont.MapleStory;
     public string CustomFontFile = string.Empty;
 
@@ -108,12 +196,15 @@ public sealed class KeyViewerSettings
         int count = Defaults.Count(Layout);
         KeyBindings = EnsureStrings(KeyBindings, count, Defaults.ForLayout(Layout));
         KeyLabels = EnsureStrings(KeyLabels, count, Array.Empty<string>());
-        FootKeyCount = Math.Clamp(FootKeyCount, 0, 8);
+        FootKeyCount = Math.Clamp(FootKeyCount, 0, 16);
         FootBindings = EnsureStrings(FootBindings, FootKeyCount, Defaults.FootBindings);
         FootLabels = EnsureStrings(FootLabels, FootKeyCount, Array.Empty<string>());
+        if (!Enum.IsDefined(FootPlacement)) FootPlacement = FootKeyPlacement.AboveKpsTotal;
+        FootPositionX = ClampFinite(FootPositionX, 0f, 1f, 0.5f);
+        FootPositionY = ClampFinite(FootPositionY, 0f, 1f, 0.82f);
         TouchFootAreaHeight = ClampFinite(TouchFootAreaHeight, 0.08f, 0.35f, 0.18f);
-        Counts = EnsureInts(Counts, 32);
-        PerKeyFontSize = EnsureFloats(PerKeyFontSize, 32);
+        Counts = EnsureInts(Counts, SlotCount);
+        PerKeyFontSize = EnsureFloats(PerKeyFontSize, SlotCount);
         PerKeyBackground = EnsureColorArray(PerKeyBackground, DefaultBackground);
         PerKeyBackgroundPressed = EnsureColorArray(PerKeyBackgroundPressed, DefaultBackgroundPressed);
         PerKeyOutline = EnsureColorArray(PerKeyOutline, DefaultOutline);
@@ -121,6 +212,19 @@ public sealed class KeyViewerSettings
         PerKeyText = EnsureColorArray(PerKeyText, DefaultText);
         PerKeyTextPressed = EnsureColorArray(PerKeyTextPressed, DefaultTextPressed);
         PerKeyRainColor = EnsureColorArray(PerKeyRainColor, DefaultRainColor);
+        BackgroundGradient ??= new KeyViewerColorGradient();
+        BackgroundPressedGradient ??= new KeyViewerColorGradient();
+        OutlineGradient ??= new KeyViewerColorGradient();
+        OutlinePressedGradient ??= new KeyViewerColorGradient();
+        TextGradient ??= new KeyViewerColorGradient();
+        TextPressedGradient ??= new KeyViewerColorGradient();
+        RainGradient ??= new KeyViewerColorGradient();
+        KpsBackgroundGradient ??= new KeyViewerColorGradient();
+        KpsOutlineGradient ??= new KeyViewerColorGradient();
+        KpsTextGradient ??= new KeyViewerColorGradient();
+        TotalBackgroundGradient ??= new KeyViewerColorGradient();
+        TotalOutlineGradient ??= new KeyViewerColorGradient();
+        TotalTextGradient ??= new KeyViewerColorGradient();
         TotalCount = Math.Max(0, TotalCount);
         Scale = ClampFinite(Scale, 0.45f, 2f, 1f);
         KeyWidth = ClampFinite(KeyWidth, 24f, 160f, 50f);
@@ -153,6 +257,29 @@ public sealed class KeyViewerSettings
         TotalBackground = EnsureColor(TotalBackground, DefaultBackground);
         TotalOutline = EnsureColor(TotalOutline, DefaultOutline);
         TotalText = EnsureColor(TotalText, DefaultText);
+        BackgroundGradient.Normalize(Background);
+        BackgroundPressedGradient.Normalize(BackgroundPressed);
+        OutlineGradient.Normalize(Outline);
+        OutlinePressedGradient.Normalize(OutlinePressed);
+        TextGradient.Normalize(Text);
+        TextPressedGradient.Normalize(TextPressed);
+        RainGradient.Normalize(RainColor);
+        KpsBackgroundGradient.Normalize(KpsBackground);
+        KpsOutlineGradient.Normalize(KpsOutline);
+        KpsTextGradient.Normalize(KpsText);
+        TotalBackgroundGradient.Normalize(TotalBackground);
+        TotalOutlineGradient.Normalize(TotalOutline);
+        TotalTextGradient.Normalize(TotalText);
+        PerKeyBackgroundGradients = EnsureGradientArray(PerKeyBackgroundGradients, PerKeyBackground);
+        PerKeyBackgroundPressedGradients = EnsureGradientArray(
+            PerKeyBackgroundPressedGradients, PerKeyBackgroundPressed);
+        PerKeyOutlineGradients = EnsureGradientArray(PerKeyOutlineGradients, PerKeyOutline);
+        PerKeyOutlinePressedGradients = EnsureGradientArray(
+            PerKeyOutlinePressedGradients, PerKeyOutlinePressed);
+        PerKeyTextGradients = EnsureGradientArray(PerKeyTextGradients, PerKeyText);
+        PerKeyTextPressedGradients = EnsureGradientArray(
+            PerKeyTextPressedGradients, PerKeyTextPressed);
+        PerKeyRainGradients = EnsureGradientArray(PerKeyRainGradients, PerKeyRainColor);
     }
 
     private static string[] EnsureStrings(string[]? source, int count, IReadOnlyList<string> fallback)
@@ -161,7 +288,12 @@ public sealed class KeyViewerSettings
         {
             var result = new string[count];
             for (int i = 0; i < count; i++)
-                result[i] = i < fallback.Count ? fallback[i] : string.Empty;
+            {
+                string value = source != null && i < source.Length ? source[i]?.Trim() ?? string.Empty : string.Empty;
+                result[i] = value.Length > 0
+                    ? value
+                    : i < fallback.Count ? fallback[i] : string.Empty;
+            }
             return result;
         }
 
@@ -177,7 +309,7 @@ public sealed class KeyViewerSettings
     private static float[] EnsureColor(float[]? source, float[] fallback)
     {
         if (source == null || source.Length < 4)
-            return fallback;
+            return fallback.ToArray();
         for (int i = 0; i < 4; i++)
             source[i] = float.IsFinite(source[i]) ? Math.Clamp(source[i], 0f, 1f) : fallback[i];
         return source;
@@ -213,14 +345,18 @@ public sealed class KeyViewerSettings
 
     private static float[][] EnsureColorArray(float[][]? source, float[] fallback)
     {
-        if (source is { Length: 32 })
+        if (source is { Length: SlotCount })
         {
             for (int i = 0; i < source.Length; i++)
-                source[i] = EnsureColor(source[i], fallback.ToArray());
+            {
+                source[i] = source[i] is { Length: >= 4 }
+                    ? EnsureColor(source[i], fallback)
+                    : fallback.ToArray();
+            }
             return source;
         }
 
-        var result = new float[32][];
+        var result = new float[SlotCount][];
         for (int i = 0; i < result.Length; i++)
         {
             float[]? value = source != null && i < source.Length ? source[i] : null;
@@ -247,15 +383,41 @@ public sealed class KeyViewerSettings
 
     private static float[][] CreateColorArray(float[] value)
     {
-        var result = new float[32][];
+        var result = new float[SlotCount][];
         for (int i = 0; i < result.Length; i++) result[i] = value.ToArray();
+        return result;
+    }
+
+    private static KeyViewerColorGradient[] EnsureGradientArray(
+        KeyViewerColorGradient[]? source,
+        float[][] fallbacks)
+    {
+        var result = source is { Length: SlotCount }
+            ? source
+            : new KeyViewerColorGradient[SlotCount];
+        for (int i = 0; i < result.Length; i++)
+        {
+            result[i] ??= new KeyViewerColorGradient();
+            result[i].Normalize(fallbacks[i]);
+        }
+        return result;
+    }
+
+    private static KeyViewerColorGradient[] CreateGradientArray()
+    {
+        var result = new KeyViewerColorGradient[SlotCount];
+        for (int i = 0; i < result.Length; i++) result[i] = new KeyViewerColorGradient();
         return result;
     }
 }
 
 internal static class Defaults
 {
-    internal static readonly string[] FootBindings = { "F8", "F3", "F7", "F2", "F6", "F1", "F5", "F4" };
+    internal static readonly string[] FootBindings =
+    {
+        "F8", "F4", "F7", "F3", "F6", "F2", "F5", "F1",
+        "F9", "F10", "F11", "F12", "F13", "F14", "F15", "F16",
+    };
 
     private static readonly string[] AllBindings =
     {
@@ -356,7 +518,7 @@ internal sealed class SettingsStore
         return settingsSaved && SaveCounts(settings);
     }
 
-    internal bool SaveCounts(KeyViewerSettings settings)
+    internal bool SaveCounts(KeyViewerSettings settings, bool durable = true)
     {
         try
         {
@@ -367,7 +529,7 @@ internal sealed class SettingsStore
                 Counts = (int[])settings.Counts.Clone(),
                 TotalCount = settings.TotalCount,
             };
-            WriteAtomic(_countsPath, JsonSerializer.Serialize(snapshot, CountOptions));
+            WriteAtomic(_countsPath, JsonSerializer.Serialize(snapshot, CountOptions), durable);
             return true;
         }
         catch (Exception exception)
@@ -398,7 +560,7 @@ internal sealed class SettingsStore
         }
     }
 
-    private static void WriteAtomic(string path, string contents)
+    private static void WriteAtomic(string path, string contents, bool durable = true)
     {
         string temporary = path + ".tmp";
         byte[] bytes = Encoding.UTF8.GetBytes(contents);
@@ -410,9 +572,9 @@ internal sealed class SettingsStore
                 FileAccess.Write,
                 FileShare.Read,
                 4096,
-                FileOptions.WriteThrough);
+                durable ? FileOptions.WriteThrough : FileOptions.None);
             stream.Write(bytes, 0, bytes.Length);
-            stream.Flush(true);
+            stream.Flush(durable);
         }
         catch
         {

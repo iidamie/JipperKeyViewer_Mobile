@@ -14,9 +14,10 @@ Implemented mobile features:
 - external keyboard polling through ImGui key events
 - per-key count, optional per-key KPS, global KPS, total count, and count formatting
 - configurable position, scale, key gap, bindings, labels, colors, and touch debug outlines
+- independent foot-key placement (up to 16 keys), including a free normalized position or a row between KPS and Total
 - full appearance controls: MapleStory, ImGui default, or `CustomFont/*.ttf` / `.otf` keyboard fonts;
   normalized position; independent key width, height, and text sizes; KPS/Total labels and layouts
-- global, pressed, per-key, KPS, Total, and rain colors with live ImGui color editors
+- global, pressed, per-key, KPS, Total, and rain colors with RGBA opacity and optional four-corner gradients
 - lightweight ImGui rain effect with configurable speed, height, length, width, and release fade
 - the original PC MapleStory OTF embedded for keyboard labels, counters, and KPS status
 - gameplay-only visibility using the `scrController` runtime facade
@@ -70,6 +71,5 @@ projects remain unchanged and continue to provide the UnityModManager and MelonL
 ## Deliberate differences
 
 The mobile port currently uses ImGui primitives instead of the PC sprite/AssetBundle/TMP renderer.
-The 108-key full keyboard, foot-layout variants beyond the mobile touch row, profiles, ghost rain,
-and the PC per-row rain controls are not included in this port. They can be
-added without changing the Starry entry point or touch state machine.
+The 108-key full keyboard, profiles, ghost rain, and the PC per-row rain controls are not included in this port.
+They can be added without changing the Starry entry point or touch state machine.

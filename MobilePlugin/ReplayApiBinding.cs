@@ -13,11 +13,17 @@ internal sealed class ReplayApiBinding
     private EventInfo? _startedEvent;
     private EventInfo? _endedEvent;
     private EventInfo? _touchEvent;
+    private EventInfo? _keyboardEvent;
     private Delegate? _startedHandler;
     private Delegate? _endedHandler;
     private Delegate? _touchHandler;
+    private Delegate? _keyboardHandler;
     private long _nextProbeTick;
     private bool _bound;
+    private volatile bool _receiveTouch;
+    private volatile bool _receiveKeyboard;
+    private bool _touchSubscribed;
+    private bool _keyboardSubscribed;
 
     internal bool IsPlaybackActive
     {
@@ -52,6 +58,7 @@ internal sealed class ReplayApiBinding
             _startedEvent = api.GetEvent("PlaybackStarted", BindingFlags.Public | BindingFlags.Static);
             _endedEvent = api.GetEvent("PlaybackEnded", BindingFlags.Public | BindingFlags.Static);
             _touchEvent = api.GetEvent("ReplayTouch", BindingFlags.Public | BindingFlags.Static);
+            _keyboardEvent = api.GetEvent("ReplayKeyboard", BindingFlags.Public | BindingFlags.Static);
             if (_activeProperty == null || _startedEvent?.EventHandlerType == null
                 || _endedEvent?.EventHandlerType == null || _touchEvent?.EventHandlerType == null)
                 return;
@@ -62,10 +69,15 @@ internal sealed class ReplayApiBinding
                 _endedEvent.EventHandlerType, this, nameof(OnReplayEnded));
             _touchHandler = Delegate.CreateDelegate(
                 _touchEvent.EventHandlerType, this, nameof(OnReplayTouch));
+            if (_keyboardEvent?.EventHandlerType != null)
+            {
+                _keyboardHandler = Delegate.CreateDelegate(
+                    _keyboardEvent.EventHandlerType, this, nameof(OnReplayKeyboard));
+            }
             _startedEvent.AddEventHandler(null, _startedHandler);
             _endedEvent.AddEventHandler(null, _endedHandler);
-            _touchEvent.AddEventHandler(null, _touchHandler);
             _bound = true;
+            UpdateInputSubscriptions();
 
             if (IsActiveWithoutProbe())
                 KeyViewerRuntime.OnReplayStarted();
@@ -75,6 +87,13 @@ internal sealed class ReplayApiBinding
             Unbind();
             PluginLog.Debug("Replay API binding deferred: " + exception.Message);
         }
+    }
+
+    internal void ConfigureInputSubscriptions(bool receiveTouch, bool receiveKeyboard)
+    {
+        _receiveTouch = receiveTouch;
+        _receiveKeyboard = receiveKeyboard;
+        UpdateInputSubscriptions();
     }
 
     internal void Dispose() => Unbind();
@@ -97,6 +116,8 @@ internal sealed class ReplayApiBinding
         float sourceWidth,
         float sourceHeight)
     {
+        if (!_receiveTouch)
+            return;
         KeyViewerRuntime.EnqueueReplayTouch(
             (AndroidInput.MotionAction)action,
             pointerId,
@@ -104,6 +125,42 @@ internal sealed class ReplayApiBinding
             y,
             sourceWidth,
             sourceHeight);
+    }
+
+    private void OnReplayKeyboard(string binding, int action, int repeat)
+    {
+        if (_receiveKeyboard)
+            KeyViewerRuntime.EnqueueReplayKeyboard(binding, action, repeat);
+    }
+
+    private void UpdateInputSubscriptions()
+    {
+        if (!_bound)
+            return;
+        try
+        {
+            UpdateSubscription(_touchEvent, _touchHandler, _receiveTouch, ref _touchSubscribed);
+            UpdateSubscription(_keyboardEvent, _keyboardHandler, _receiveKeyboard, ref _keyboardSubscribed);
+        }
+        catch (Exception exception)
+        {
+            PluginLog.Debug("Replay input subscription update deferred: " + exception.Message);
+        }
+    }
+
+    private static void UpdateSubscription(
+        EventInfo? @event,
+        Delegate? handler,
+        bool shouldSubscribe,
+        ref bool subscribed)
+    {
+        if (@event == null || handler == null || subscribed == shouldSubscribe)
+            return;
+        if (shouldSubscribe)
+            @event.AddEventHandler(null, handler);
+        else
+            @event.RemoveEventHandler(null, handler);
+        subscribed = shouldSubscribe;
     }
 
     private void Unbind()
@@ -114,8 +171,10 @@ internal sealed class ReplayApiBinding
                 _startedEvent.RemoveEventHandler(null, _startedHandler);
             if (_endedEvent != null && _endedHandler != null)
                 _endedEvent.RemoveEventHandler(null, _endedHandler);
-            if (_touchEvent != null && _touchHandler != null)
+            if (_touchSubscribed && _touchEvent != null && _touchHandler != null)
                 _touchEvent.RemoveEventHandler(null, _touchHandler);
+            if (_keyboardSubscribed && _keyboardEvent != null && _keyboardHandler != null)
+                _keyboardEvent.RemoveEventHandler(null, _keyboardHandler);
         }
         catch { }
 
@@ -123,9 +182,13 @@ internal sealed class ReplayApiBinding
         _startedEvent = null;
         _endedEvent = null;
         _touchEvent = null;
+        _keyboardEvent = null;
         _startedHandler = null;
         _endedHandler = null;
         _touchHandler = null;
+        _keyboardHandler = null;
         _bound = false;
+        _touchSubscribed = false;
+        _keyboardSubscribed = false;
     }
 }

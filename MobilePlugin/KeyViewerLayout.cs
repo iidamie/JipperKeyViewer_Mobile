@@ -33,11 +33,20 @@ internal static class KeyViewerLayout
         target.Clear();
         statusTarget.Clear();
         int mainCount = Defaults.Count(settings.Layout);
-        int footCount = settings.FootKeyCount;
+        int footCount = Math.Clamp(settings.FootKeyCount, 0, 16);
         int mainRows = MainRows(settings.Layout);
         bool showStatus = !settings.StreamerMode && (settings.ShowKps || settings.ShowTotal);
         int statusRows = showStatus ? 1 : 0;
-        int rowCount = mainRows + (footCount > 0 ? 1 : 0) + statusRows;
+        bool betweenStatus = footCount > 0
+            && footCount <= 8
+            && settings.FootPlacement == FootKeyPlacement.BetweenKpsAndTotal
+            && showStatus
+            && settings.ShowKps
+            && settings.ShowTotal;
+        bool customFoot = footCount > 0 && settings.FootPlacement == FootKeyPlacement.Custom;
+        int footRows = FootRows(footCount);
+        int rowCount = mainRows + statusRows
+            + (footCount > 0 && !betweenStatus && !customFoot ? footRows : 0);
 
         float scale = Math.Clamp(settings.Scale, 0.45f, 2f);
         float keyWidth = Math.Clamp(settings.KeyWidth, 24f, 160f) * scale;
@@ -70,14 +79,51 @@ internal static class KeyViewerLayout
         boundsMax = new Vector2(left + keyboardWidth, bottom);
 
         if (showStatus)
-            AddStatusRow(statusTarget, settings.ShowKps, settings.ShowTotal, left, bottom, keyboardWidth, keyHeight, gap);
+        {
+            if (betweenStatus)
+                AddBetweenStatusRow(
+                    target,
+                    statusTarget,
+                    footCount,
+                    left,
+                    bottom,
+                    keyboardWidth,
+                    keyWidth,
+                    keyHeight,
+                    gap);
+            else
+                AddStatusRow(
+                    statusTarget,
+                    settings.ShowKps,
+                    settings.ShowTotal,
+                    left,
+                    bottom,
+                    keyboardWidth,
+                    keyHeight,
+                    gap);
+        }
 
-        if (footCount > 0)
-            AddRow(target, settings.FootBindings, footCount, true, statusRows, left, bottom, keyboardWidth, keyWidth, keyHeight, gap);
+        if (footCount > 0 && !betweenStatus)
+        {
+            if (customFoot)
+                AddCustomFootRows(target, settings, footCount, display, keyWidth, keyHeight, gap);
+            else
+                AddFootRows(target, footCount, statusRows, left, bottom, keyboardWidth, keyWidth, keyHeight, gap);
+        }
 
-        int mainOffset = statusRows + (footCount > 0 ? 1 : 0);
-        int[] front = Enumerable.Range(0, Math.Min(8, mainCount)).ToArray();
-        AddRow(target, front, front.Length, false, mainOffset, left, bottom, keyboardWidth, keyWidth, keyHeight, gap);
+        int mainOffset = statusRows + (footCount > 0 && !betweenStatus && !customFoot ? footRows : 0);
+        AddSequentialRow(
+            target,
+            0,
+            Math.Min(8, mainCount),
+            false,
+            mainOffset,
+            left,
+            bottom,
+            keyboardWidth,
+            keyWidth,
+            keyHeight,
+            gap);
 
         if (mainRows >= 2)
         {
@@ -89,6 +135,23 @@ internal static class KeyViewerLayout
         {
             int[] third = settings.Layout == KeyLayout.Key24 ? Third24 : Third20;
             AddRow(target, third, third.Length, false, mainOffset + 2, left, bottom, keyboardWidth, keyWidth, keyHeight, gap);
+        }
+
+        if (target.Count > 0)
+        {
+            float minX = float.MaxValue;
+            float minY = float.MaxValue;
+            float maxX = float.MinValue;
+            float maxY = float.MinValue;
+            foreach (KeyRect rect in target)
+            {
+                minX = Math.Min(minX, rect.Min.X);
+                minY = Math.Min(minY, rect.Min.Y);
+                maxX = Math.Max(maxX, rect.Max.X);
+                maxY = Math.Max(maxY, rect.Max.Y);
+            }
+            boundsMin = new Vector2(Math.Min(boundsMin.X, minX), Math.Min(boundsMin.Y, minY));
+            boundsMax = new Vector2(Math.Max(boundsMax.X, maxX), Math.Max(boundsMax.Y, maxY));
         }
     }
 
@@ -117,6 +180,173 @@ internal static class KeyViewerLayout
             new Vector2(left, y),
             new Vector2(left + keyboardWidth, bottom)));
     }
+
+    private static void AddBetweenStatusRow(
+        List<KeyRect> keyTarget,
+        List<StatusRect> statusTarget,
+        int footCount,
+        float left,
+        float bottom,
+        float keyboardWidth,
+        float keyWidth,
+        float keyHeight,
+        float gap)
+    {
+        float footKeyWidth = keyWidth;
+        float footWidth = footCount * footKeyWidth + Math.Max(0, footCount - 1) * gap;
+        float minimumStatusWidth = Math.Clamp(keyHeight * 1.1f, 48f, 120f);
+        float availableFootWidth = keyboardWidth - minimumStatusWidth * 2f - gap * 2f;
+        if (footWidth > availableFootWidth && availableFootWidth > 0f)
+        {
+            footKeyWidth = Math.Max(8f, (availableFootWidth - Math.Max(0, footCount - 1) * gap) / footCount);
+            footWidth = footCount * footKeyWidth + Math.Max(0, footCount - 1) * gap;
+        }
+
+        float sideWidth = Math.Max(16f, (keyboardWidth - footWidth - gap * 2f) * 0.5f);
+        float rowTop = bottom - keyHeight;
+        float footLeft = left + (keyboardWidth - footWidth) * 0.5f;
+        statusTarget.Add(new StatusRect(
+            false,
+            new Vector2(left, rowTop),
+            new Vector2(left + sideWidth, bottom)));
+        statusTarget.Add(new StatusRect(
+            true,
+            new Vector2(left + keyboardWidth - sideWidth, rowTop),
+            new Vector2(left + keyboardWidth, bottom)));
+        AddHorizontalFootRow(
+            keyTarget,
+            0,
+            footCount,
+            rowTop,
+            footLeft,
+            footKeyWidth,
+            keyHeight,
+            gap);
+    }
+
+    private static void AddFootRows(
+        List<KeyRect> target,
+        int count,
+        int firstRow,
+        float left,
+        float bottom,
+        float keyboardWidth,
+        float keyWidth,
+        float keyHeight,
+        float gap)
+    {
+        int firstCount = Math.Min(8, count);
+        AddSequentialRow(
+            target,
+            0,
+            firstCount,
+            true,
+            firstRow,
+            left,
+            bottom,
+            keyboardWidth,
+            keyWidth,
+            keyHeight,
+            gap);
+        if (count <= 8) return;
+
+        int secondCount = count - firstCount;
+        AddSequentialRow(
+            target,
+            firstCount,
+            secondCount,
+            true,
+            firstRow + 1,
+            left,
+            bottom,
+            keyboardWidth,
+            keyWidth,
+            keyHeight,
+            gap);
+    }
+
+    private static void AddCustomFootRows(
+        List<KeyRect> target,
+        KeyViewerSettings settings,
+        int count,
+        Vector2 display,
+        float keyWidth,
+        float keyHeight,
+        float gap)
+    {
+        int firstCount = Math.Min(8, count);
+        int secondCount = Math.Max(0, count - firstCount);
+        int rows = secondCount > 0 ? 2 : 1;
+        float firstWidth = firstCount * keyWidth + Math.Max(0, firstCount - 1) * gap;
+        float secondWidth = secondCount * keyWidth + Math.Max(0, secondCount - 1) * gap;
+        float width = Math.Max(firstWidth, secondWidth);
+        float height = rows * keyHeight + Math.Max(0, rows - 1) * gap;
+        float centerX = display.X * Math.Clamp(settings.FootPositionX, 0f, 1f);
+        float centerY = display.Y * Math.Clamp(settings.FootPositionY, 0f, 1f);
+        float left = Math.Clamp(centerX - width * 0.5f, 4f, Math.Max(4f, display.X - width - 4f));
+        float top = Math.Clamp(centerY - height * 0.5f, 4f, Math.Max(4f, display.Y - height - 4f));
+        AddHorizontalFootRow(target, 0, firstCount, top, left, keyWidth, keyHeight, gap);
+        if (secondCount > 0)
+        {
+            float secondLeft = left + (width - secondWidth) * 0.5f;
+            AddHorizontalFootRow(
+                target,
+                firstCount,
+                secondCount,
+                top + keyHeight + gap,
+                secondLeft,
+                keyWidth,
+                keyHeight,
+                gap);
+        }
+    }
+
+    private static void AddSequentialRow(
+        List<KeyRect> target,
+        int indexStart,
+        int count,
+        bool foot,
+        int row,
+        float left,
+        float bottom,
+        float keyboardWidth,
+        float keyWidth,
+        float keyHeight,
+        float gap)
+    {
+        if (count <= 0) return;
+        float rowWidth = count * keyWidth + (count - 1) * gap;
+        float rowLeft = left + (keyboardWidth - rowWidth) * 0.5f;
+        float y = bottom - (row + 1) * keyHeight - row * gap;
+        AddHorizontalFootRow(target, indexStart, count, y, rowLeft, keyWidth, keyHeight, gap, row, foot);
+    }
+
+    private static void AddHorizontalFootRow(
+        List<KeyRect> target,
+        int indexStart,
+        int count,
+        float y,
+        float rowLeft,
+        float keyWidth,
+        float keyHeight,
+        float gap,
+        int row = 0,
+        bool foot = true)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            int index = indexStart + i;
+            float x = rowLeft + i * (keyWidth + gap);
+            target.Add(new KeyRect(
+                index,
+                foot,
+                row,
+                new Vector2(x, y),
+                new Vector2(x + keyWidth, y + keyHeight)));
+        }
+    }
+
+    private static int FootRows(int count) => count > 8 ? 2 : count > 0 ? 1 : 0;
 
     internal static int[] BackSequence(KeyLayout layout) => layout switch
     {

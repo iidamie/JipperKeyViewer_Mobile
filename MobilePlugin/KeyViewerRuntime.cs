@@ -6,10 +6,10 @@ using StArray.ModManager.Android.Native;
 
 namespace JipperKeyViewer.Mobile;
 
-internal static class KeyViewerRuntime
+internal static unsafe class KeyViewerRuntime
 {
     private const int MaxMainKeys = 24;
-    private const int MaxFootKeys = 8;
+    private const int MaxFootKeys = 16;
     private const int MaxSlots = MaxMainKeys + MaxFootKeys;
     private const int TouchQueueCapacity = 1024;
 
@@ -21,6 +21,7 @@ internal static class KeyViewerRuntime
         float Y,
         float SourceWidth,
         float SourceHeight);
+    private readonly record struct ReplayKeyboardEvent(string Binding, int Action, int Repeat);
 
     private sealed class RainDrop
     {
@@ -33,6 +34,8 @@ internal static class KeyViewerRuntime
 
     private static readonly ConcurrentQueue<TouchEventInfo> TouchEvents = new();
     private static readonly ConcurrentQueue<ReplayTouchEvent> ReplayTouchEvents = new();
+    private static readonly ConcurrentQueue<ReplayKeyboardEvent> ReplayKeyboardEvents = new();
+    private static readonly HashSet<ImGuiKey> ReplayDownKeys = new();
     private static readonly Dictionary<int, TouchBinding> ActivePointers = new();
     private static readonly Dictionary<int, TouchBinding> ReplayPointers = new();
     private static readonly int[] TouchMainCounts = new int[MaxMainKeys];
@@ -45,8 +48,16 @@ internal static class KeyViewerRuntime
     private static readonly int[] ReplayFootCounts = new int[MaxFootKeys];
     private static readonly bool[] ReplayMainPressed = new bool[MaxMainKeys];
     private static readonly bool[] ReplayFootPressed = new bool[MaxFootKeys];
+    private static readonly string?[] CachedBindingValues = new string?[MaxSlots];
+    private static readonly string?[] CachedCustomLabels = new string?[MaxSlots];
+    private static readonly ImGuiKey[] CachedBindingKeys = new ImGuiKey[MaxSlots];
+    private static readonly string[] CachedDisplayLabels = new string[MaxSlots];
+    private static readonly bool[] BindingCacheInitialized = new bool[MaxSlots];
     private static readonly int[] FrontSequence = { 0, 1, 2, 3, 4, 5, 6, 7 };
-    private static readonly int[] FootSequence = { 0, 1, 2, 3, 4, 5, 6, 7 };
+    private static readonly int[] FootSequence =
+    {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    };
     private static readonly Queue<float> PressTimes = new(256);
     private static readonly Queue<float>[] SlotPressTimes = CreateSlotQueues();
     private static readonly List<KeyRect> Geometry = new(32);
@@ -64,8 +75,10 @@ internal static class KeyViewerRuntime
 
     internal static void Reset(KeyViewerSettings settings)
     {
+        KeyViewerKeyboardInput.Reset();
         DrainTouchEvents();
         DrainReplayTouchEvents();
+        DrainReplayKeyboardEvents();
         Array.Clear(TouchMainCounts);
         Array.Clear(TouchFootCounts);
         Array.Clear(KeyboardMainPressed);
@@ -76,8 +89,12 @@ internal static class KeyViewerRuntime
         Array.Clear(ReplayFootCounts);
         Array.Clear(ReplayMainPressed);
         Array.Clear(ReplayFootPressed);
+        Array.Clear(BindingCacheInitialized);
+        Array.Clear(CachedBindingKeys);
+        Array.Clear(CachedDisplayLabels);
         ActivePointers.Clear();
         ReplayPointers.Clear();
+        ReplayDownKeys.Clear();
         PressTimes.Clear();
         foreach (Queue<float> queue in SlotPressTimes) queue.Clear();
         RainDrops.Clear();
@@ -95,10 +112,13 @@ internal static class KeyViewerRuntime
 
     internal static void ResetInputState()
     {
+        KeyViewerKeyboardInput.ResetDownState();
         DrainTouchEvents();
         DrainReplayTouchEvents();
+        DrainReplayKeyboardEvents();
         ActivePointers.Clear();
         ReplayPointers.Clear();
+        ReplayDownKeys.Clear();
         Array.Clear(TouchMainCounts);
         Array.Clear(TouchFootCounts);
         Array.Clear(KeyboardMainPressed);
@@ -143,6 +163,15 @@ internal static class KeyViewerRuntime
             action, pointerId, x, y, sourceWidth, sourceHeight));
     }
 
+    internal static void EnqueueReplayKeyboard(string binding, int action, int repeat)
+    {
+        if (string.IsNullOrWhiteSpace(binding))
+            return;
+        while (ReplayKeyboardEvents.Count >= TouchQueueCapacity
+            && ReplayKeyboardEvents.TryDequeue(out _)) { }
+        ReplayKeyboardEvents.Enqueue(new ReplayKeyboardEvent(binding, action, repeat));
+    }
+
     internal static void OnReplayStarted() => ResetInputState();
 
     internal static void OnReplayEnded() => ResetInputState();
@@ -150,17 +179,20 @@ internal static class KeyViewerRuntime
     internal static void Update(JipperKeyViewerPlugin plugin, float delta, bool replayPlayback)
     {
         KeyViewerSettings settings = plugin.Settings;
-        settings.Normalize();
         bool settingsPanelVisible = plugin.ConsumeSettingsPanelVisibility();
         _settingsPanelVisible = settingsPanelVisible;
+        bool physicalKeyboardInput = !replayPlayback && settings.KeyboardInputEnabled;
+        if (physicalKeyboardInput)
+            KeyViewerKeyboardInput.Update();
         Vector2 display = ImGui.GetIO().DisplaySize;
         if (display.X <= 1f || display.Y <= 1f) return;
 
-        if (_layout != (int)settings.Layout || _footCount != settings.FootKeyCount)
+        int footCount = Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys);
+        if (_layout != (int)settings.Layout || _footCount != footCount)
         {
             ResetInputState();
             _layout = (int)settings.Layout;
-            _footCount = settings.FootKeyCount;
+            _footCount = footCount;
         }
 
         KeyViewerLayout.Build(
@@ -190,21 +222,27 @@ internal static class KeyViewerRuntime
         {
             ClearPhysicalTouchInputState();
             ProcessReplayTouchEvents(settings, display);
-            Array.Clear(KeyboardMainPressed);
-            Array.Clear(KeyboardFootPressed);
+            ProcessReplayKeyboardEvents();
+            ApplyReplayKeyboardState(settings);
         }
         else
         {
             ClearReplayTouchInputState(clearRain: false);
+            ClearReplayKeyboardInputState();
             if (settings.TouchInputEnabled)
                 ProcessTouchEvents(settings, display);
             else
                 ClearTouchInputState(clearRain: false);
 
-            PollKeyboard(settings);
+            if (settings.KeyboardInputEnabled)
+                PollKeyboard(settings);
+            else
+                ClearKeyboardInputState();
         }
 
         ProcessKeyStates(settings);
+        if (physicalKeyboardInput)
+            KeyViewerKeyboardInput.ClearFramePresses();
         TrimPressTimes(settings);
         TrimRain(settings);
     }
@@ -287,6 +325,51 @@ internal static class KeyViewerRuntime
             RainDrops.Clear();
     }
 
+    private static void ClearReplayKeyboardInputState()
+    {
+        DrainReplayKeyboardEvents();
+        ReplayDownKeys.Clear();
+        Array.Clear(KeyboardMainPressed);
+        Array.Clear(KeyboardFootPressed);
+    }
+
+    private static void ClearKeyboardInputState()
+    {
+        Array.Clear(KeyboardMainPressed);
+        Array.Clear(KeyboardFootPressed);
+    }
+
+    private static void ProcessReplayKeyboardEvents()
+    {
+        while (ReplayKeyboardEvents.TryDequeue(out ReplayKeyboardEvent input))
+        {
+            if (!KeyViewerKeyMap.TryParse(input.Binding, out ImGuiKey key))
+                continue;
+            if (input.Action == 1)
+                ReplayDownKeys.Remove(key);
+            else
+                ReplayDownKeys.Add(key);
+        }
+    }
+
+    private static void ApplyReplayKeyboardState(KeyViewerSettings settings)
+    {
+        Array.Clear(KeyboardMainPressed);
+        Array.Clear(KeyboardFootPressed);
+        int mainCount = Defaults.Count(settings.Layout);
+        for (int i = 0; i < mainCount; i++)
+        {
+            ImGuiKey key = GetCachedBindingKey(settings, i, foot: false);
+            KeyboardMainPressed[i] = key != ImGuiKey.None && ReplayDownKeys.Contains(key);
+        }
+        int footCount = Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys);
+        for (int i = 0; i < footCount; i++)
+        {
+            ImGuiKey key = GetCachedBindingKey(settings, i, foot: true);
+            KeyboardFootPressed[i] = key != ImGuiKey.None && ReplayDownKeys.Contains(key);
+        }
+    }
+
     private static void ProcessReplayTouchEvents(KeyViewerSettings settings, Vector2 display)
     {
         while (ReplayTouchEvents.TryDequeue(out ReplayTouchEvent info))
@@ -335,7 +418,7 @@ internal static class KeyViewerRuntime
         ReleasePointer(pointerId, replay);
 
         float normalizedY = Math.Clamp(y / Math.Max(1f, display.Y), 0f, 0.999999f);
-        int footCount = settings.FootKeyCount;
+        int footCount = Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys);
         float footHeight = settings.TouchFootAreaEnabled && footCount > 0
             ? Math.Clamp(settings.TouchFootAreaHeight, 0.08f, 0.35f) : 0f;
         float handHeight = 1f - footHeight;
@@ -450,9 +533,18 @@ internal static class KeyViewerRuntime
         if (!settings.KeyboardInputEnabled) return;
 
         for (int i = 0; i < Defaults.Count(settings.Layout); i++)
-            KeyboardMainPressed[i] = IsKeyDown(settings.KeyBindings[i]);
-        for (int i = 0; i < settings.FootKeyCount; i++)
-            KeyboardFootPressed[i] = IsKeyDown(settings.FootBindings[i]);
+        {
+            ImGuiKey key = GetCachedBindingKey(settings, i, foot: false);
+            KeyboardMainPressed[i] = key != ImGuiKey.None
+                && (KeyViewerKeyboardInput.IsDown(key) || KeyViewerKeyboardInput.WasPressed(key));
+        }
+        int footCount = Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys);
+        for (int i = 0; i < footCount; i++)
+        {
+            ImGuiKey key = GetCachedBindingKey(settings, i, foot: true);
+            KeyboardFootPressed[i] = key != ImGuiKey.None
+                && (KeyViewerKeyboardInput.IsDown(key) || KeyViewerKeyboardInput.WasPressed(key));
+        }
     }
 
     private static void ProcessKeyStates(KeyViewerSettings settings)
@@ -464,7 +556,8 @@ internal static class KeyViewerRuntime
                 i,
                 false,
                 TouchMainCounts[i] > 0 || KeyboardMainPressed[i] || ReplayMainCounts[i] > 0);
-        for (int i = 0; i < settings.FootKeyCount; i++)
+        int footCount = Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys);
+        for (int i = 0; i < footCount; i++)
             ProcessSlot(
                 settings,
                 i,
@@ -588,6 +681,8 @@ internal static class KeyViewerRuntime
             float keyWidth = rect.Max.X - rect.Min.X;
             float width = Math.Max(2f, keyWidth * widthScale);
             float x = (rect.Min.X + rect.Max.X - width) * 0.5f;
+            float[] rainColor = GetRainColor(settings, drop);
+            KeyViewerColorGradient? rainGradient = GetRainGradient(settings, drop);
 
             // Keep the part inside RainHeight solid. Only the overflow above that
             // boundary receives the vertical fade, otherwise the whole rain segment
@@ -597,7 +692,7 @@ internal static class KeyViewerRuntime
             {
                 Vector2 solidMin = new(x, rect.Min.Y - solidFar);
                 Vector2 solidMax = new(x + width, rect.Min.Y - nearDistance);
-                drawList.AddRectFilled(solidMin, solidMax, ColorU32(GetRainColor(settings, drop), 1f));
+                AddGradientRect(drawList, solidMin, solidMax, rainColor, rainGradient, 1f, 1f);
             }
 
             float fadeNear = Math.Max(nearDistance, maxHeight);
@@ -607,13 +702,7 @@ internal static class KeyViewerRuntime
             float bottomAlpha = FadeBeyondRainHeight(fadeNear, maxHeight, fadePixels);
             Vector2 fadeMin = new(x, rect.Min.Y - fadeFar);
             Vector2 fadeMax = new(x + width, rect.Min.Y - fadeNear);
-            drawList.AddRectFilledMultiColor(
-                fadeMin,
-                fadeMax,
-                ColorU32(GetRainColor(settings, drop), topAlpha),
-                ColorU32(GetRainColor(settings, drop), topAlpha),
-                ColorU32(GetRainColor(settings, drop), bottomAlpha),
-                ColorU32(GetRainColor(settings, drop), bottomAlpha));
+            AddGradientRect(drawList, fadeMin, fadeMax, rainColor, rainGradient, topAlpha, bottomAlpha);
         }
     }
 
@@ -630,12 +719,27 @@ internal static class KeyViewerRuntime
     {
         bool pressed = rect.Foot ? FootPressed[rect.Index] : MainPressed[rect.Index];
         int slot = SlotIndex(rect.Index, rect.Foot);
-        uint background = ColorU32(GetKeyColor(settings, slot, pressed, ColorRole.Background), 1f);
-        uint outline = ColorU32(GetKeyColor(settings, slot, pressed, ColorRole.Outline), 1f);
-        uint textColor = ColorU32(GetKeyColor(settings, slot, pressed, ColorRole.Text), 1f);
+        float[] backgroundColor = GetKeyColor(settings, slot, pressed, ColorRole.Background);
+        float[] outlineColor = GetKeyColor(settings, slot, pressed, ColorRole.Outline);
+        KeyViewerColorGradient? backgroundGradient = GetKeyGradient(
+            settings, slot, pressed, ColorRole.Background);
+        KeyViewerColorGradient? outlineGradient = GetKeyGradient(
+            settings, slot, pressed, ColorRole.Outline);
+        KeyViewerColorGradient? textGradient = GetKeyGradient(
+            settings, slot, pressed, ColorRole.Text);
+        float[] textColorArray = GetKeyColor(settings, slot, pressed, ColorRole.Text);
+        uint textColor = ColorU32(ResolveColor(textColorArray, textGradient), 1f);
         float rounding = Math.Min(6f, (rect.Max.Y - rect.Min.Y) * 0.12f);
-        drawList.AddRectFilled(rect.Min, rect.Max, background, rounding);
-        drawList.AddRect(rect.Min, rect.Max, outline, rounding, ImDrawFlags.None, pressed ? 2f : 1.5f);
+        DrawKeyBox(
+            drawList,
+            rect.Min,
+            rect.Max,
+            backgroundColor,
+            backgroundGradient,
+            outlineColor,
+            outlineGradient,
+            rounding,
+            pressed ? 2f : 1.5f);
 
         string label = GetLabel(settings, rect);
         float height = rect.Max.Y - rect.Min.Y;
@@ -652,7 +756,7 @@ internal static class KeyViewerRuntime
         Vector2 labelPosition = new(
             rect.Min.X + (rect.Max.X - rect.Min.X - labelSize.X) * 0.5f,
             rect.Min.Y + (height - labelSize.Y) * (settings.ShowMainKeyCount ? 0.30f : 0.5f));
-        AddTextShadow(drawList, font, fontSize, labelPosition, textColor, label);
+        AddTextShadow(drawList, font, fontSize, labelPosition, textColor, label, textGradient);
 
         if (!settings.ShowMainKeyCount) return;
         string value = settings.ShowPerKeyKps
@@ -665,7 +769,7 @@ internal static class KeyViewerRuntime
         Vector2 valuePosition = new(
             rect.Min.X + (rect.Max.X - rect.Min.X - valueMeasure.X) * 0.5f,
             rect.Max.Y - valueMeasure.Y - Math.Max(3f, height * 0.08f));
-        KeyViewerFontRuntime.AddText(drawList, font, valueSize, valuePosition, textColor, value);
+        AddColorText(drawList, font, valueSize, valuePosition, textColor, value, textGradient);
     }
 
     private static void DrawStatusKey(
@@ -677,14 +781,23 @@ internal static class KeyViewerRuntime
         float[] backgroundColor = rect.Total ? settings.TotalBackground : settings.KpsBackground;
         float[] outlineColor = rect.Total ? settings.TotalOutline : settings.KpsOutline;
         float[] textColorArray = rect.Total ? settings.TotalText : settings.KpsText;
-        uint background = ColorU32(backgroundColor, 1f);
-        uint outline = ColorU32(outlineColor, 1f);
-        uint textColor = ColorU32(textColorArray, 1f);
+        KeyViewerColorGradient? backgroundGradient = GetStatusGradient(settings, rect.Total, ColorRole.Background);
+        KeyViewerColorGradient? outlineGradient = GetStatusGradient(settings, rect.Total, ColorRole.Outline);
+        KeyViewerColorGradient? textGradient = GetStatusGradient(settings, rect.Total, ColorRole.Text);
+        uint textColor = ColorU32(ResolveColor(textColorArray, textGradient), 1f);
         float height = rect.Max.Y - rect.Min.Y;
         float width = rect.Max.X - rect.Min.X;
         float rounding = Math.Min(6f, height * 0.12f);
-        drawList.AddRectFilled(rect.Min, rect.Max, background, rounding);
-        drawList.AddRect(rect.Min, rect.Max, outline, rounding, ImDrawFlags.None, 1.5f);
+        DrawKeyBox(
+            drawList,
+            rect.Min,
+            rect.Max,
+            backgroundColor,
+            backgroundGradient,
+            outlineColor,
+            outlineGradient,
+            rounding,
+            1.5f);
 
         string label = rect.Total ? settings.TotalLabel : settings.KpsLabel;
         string value = rect.Total
@@ -701,7 +814,14 @@ internal static class KeyViewerRuntime
             Vector2 hiddenValuePosition = new(
                 rect.Min.X + (width - hiddenValueMeasure.X) * 0.5f,
                 rect.Min.Y + (height - hiddenValueMeasure.Y) * 0.5f);
-            AddTextShadow(drawList, font, hiddenValueSize, hiddenValuePosition, textColor, value);
+            AddTextShadow(
+                drawList,
+                font,
+                hiddenValueSize,
+                hiddenValuePosition,
+                textColor,
+                value,
+                textGradient);
             return;
         }
 
@@ -745,14 +865,16 @@ internal static class KeyViewerRuntime
             labelSize,
             labelPosition,
             textColor,
-            label);
+            label,
+            textGradient);
         AddTextShadow(
             drawList,
             font,
             valueSize,
             valuePosition,
             textColor,
-            value);
+            value,
+            textGradient);
     }
 
     private static IReadOnlyList<int> TouchRow(KeyLayout layout, int rowFromTop)
@@ -777,7 +899,9 @@ internal static class KeyViewerRuntime
     private static void DrawTouchRegions(KeyViewerSettings settings, Vector2 display, ImDrawListPtr drawList)
     {
         int mainRows = KeyViewerLayout.MainRows(settings.Layout);
-        int footCount = settings.TouchFootAreaEnabled ? settings.FootKeyCount : 0;
+        int footCount = settings.TouchFootAreaEnabled
+            ? Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys)
+            : 0;
         float footHeight = footCount > 0
             ? Math.Clamp(settings.TouchFootAreaHeight, 0.08f, 0.35f)
             : 0f;
@@ -848,70 +972,39 @@ internal static class KeyViewerRuntime
 
     private static string GetLabel(KeyViewerSettings settings, KeyRect rect)
     {
-        string custom = rect.Foot ? settings.FootLabels[rect.Index] : settings.KeyLabels[rect.Index];
-        if (!string.IsNullOrWhiteSpace(custom)) return custom;
-        string binding = rect.Foot ? settings.FootBindings[rect.Index] : settings.KeyBindings[rect.Index];
-        return PrettyBinding(binding);
+        EnsureBindingCache(settings, rect.Index, rect.Foot);
+        return CachedDisplayLabels[SlotIndex(rect.Index, rect.Foot)];
     }
 
-    private static bool IsKeyDown(string binding)
+    private static ImGuiKey GetCachedBindingKey(KeyViewerSettings settings, int index, bool foot)
     {
-        if (!TryMapKey(binding, out ImGuiKey key)) return false;
-        try { return ImGui.IsKeyDown(key); }
-        catch { return false; }
+        EnsureBindingCache(settings, index, foot);
+        return CachedBindingKeys[SlotIndex(index, foot)];
     }
 
-    private static bool TryMapKey(string? name, out ImGuiKey key)
+    private static void EnsureBindingCache(KeyViewerSettings settings, int index, bool foot)
     {
-        key = ImGuiKey.None;
-        if (string.IsNullOrWhiteSpace(name)) return false;
-        string value = name.Trim();
-        value = value switch
-        {
-            "Alpha0" => "_0",
-            "Alpha1" => "_1",
-            "Alpha2" => "_2",
-            "Alpha3" => "_3",
-            "Alpha4" => "_4",
-            "Alpha5" => "_5",
-            "Alpha6" => "_6",
-            "Alpha7" => "_7",
-            "Alpha8" => "_8",
-            "Alpha9" => "_9",
-            "Equals" => "Equal",
-            "Return" => "Enter",
-            "LeftControl" => "LeftCtrl",
-            "RightControl" => "RightCtrl",
-            "BackQuote" => "GraveAccent",
-            "LBracket" => "LeftBracket",
-            "RBracket" => "RightBracket",
-            _ => value,
-        };
-        if (!Enum.TryParse(value, true, out key)) return false;
-        return key != ImGuiKey.None;
-    }
+        int slot = SlotIndex(index, foot);
+        string binding = foot ? settings.FootBindings[index] : settings.KeyBindings[index];
+        string customLabel = foot ? settings.FootLabels[index] : settings.KeyLabels[index];
+        binding ??= string.Empty;
+        customLabel ??= string.Empty;
 
-    private static string PrettyBinding(string binding)
-        => binding switch
-        {
-            "Backspace" => "Back",
-            "CapsLock" => "Caps",
-            "Backslash" => "\\",
-            "Equal" or "Equals" => "=",
-            "Comma" => ",",
-            "Period" => ".",
-            "Semicolon" => ";",
-            "Space" => "Space",
-            "LeftShift" => "LShift",
-            "RightShift" => "RShift",
-            "LeftControl" => "LCtrl",
-            "RightControl" => "RCtrl",
-            "LeftCtrl" => "LCtrl",
-            "RightCtrl" => "RCtrl",
-            "GraveAccent" or "BackQuote" => "`",
-            _ when binding.StartsWith("_") && binding.Length == 2 => binding[1..],
-            _ => string.IsNullOrWhiteSpace(binding) ? "-" : binding,
-        };
+        if (BindingCacheInitialized[slot]
+            && string.Equals(CachedBindingValues[slot], binding, StringComparison.Ordinal)
+            && string.Equals(CachedCustomLabels[slot], customLabel, StringComparison.Ordinal))
+            return;
+
+        BindingCacheInitialized[slot] = true;
+        CachedBindingValues[slot] = binding;
+        CachedCustomLabels[slot] = customLabel;
+        CachedBindingKeys[slot] = KeyViewerKeyMap.TryParse(binding, out ImGuiKey key)
+            ? key
+            : ImGuiKey.None;
+        CachedDisplayLabels[slot] = string.IsNullOrWhiteSpace(customLabel)
+            ? KeyViewerKeyMap.GetDisplayName(binding)
+            : customLabel;
+    }
 
     private static float FitFontSize(ImFontPtr font, string text, float preferred, float maxWidth, float minimum)
     {
@@ -945,7 +1038,14 @@ internal static class KeyViewerRuntime
         return string.Empty;
     }
 
-    private static void AddTextShadow(ImDrawListPtr drawList, ImFontPtr font, float size, Vector2 position, uint color, string text)
+    private static void AddTextShadow(
+        ImDrawListPtr drawList,
+        ImFontPtr font,
+        float size,
+        Vector2 position,
+        uint color,
+        string text,
+        KeyViewerColorGradient? gradient = null)
     {
         KeyViewerFontRuntime.AddText(
             drawList,
@@ -954,7 +1054,87 @@ internal static class KeyViewerRuntime
             position + new Vector2(1f, 1f),
             0xB0000000,
             text);
-        KeyViewerFontRuntime.AddText(drawList, font, size, position, color, text);
+        AddColorText(drawList, font, size, position, color, text, gradient);
+    }
+
+    private static void AddColorText(
+        ImDrawListPtr drawList,
+        ImFontPtr font,
+        float size,
+        Vector2 position,
+        uint color,
+        string text,
+        KeyViewerColorGradient? gradient)
+    {
+        if (gradient is not { Enabled: true })
+        {
+            KeyViewerFontRuntime.AddText(drawList, font, size, position, color, text);
+            return;
+        }
+
+        if (string.IsNullOrEmpty(text)) return;
+        if (font.NativePtr == null)
+        {
+            KeyViewerFontRuntime.AddText(drawList, font, size, position, color, text);
+            return;
+        }
+        IntPtr textureId = font.ContainerAtlas.TexID;
+        if (textureId == IntPtr.Zero)
+        {
+            KeyViewerFontRuntime.AddText(drawList, font, size, position, color, text);
+            return;
+        }
+
+        Vector2 measure = font.CalcTextSizeA(size, float.MaxValue, 0f, text);
+        float scale = size / Math.Max(1f, font.FontSize);
+        Vector2 cursor = position;
+        drawList.PushTextureID(textureId);
+        try
+        {
+            foreach (char character in text)
+            {
+                if (character == '\n')
+                {
+                    cursor.X = position.X;
+                    cursor.Y += font.FontSize * scale;
+                    continue;
+                }
+
+                ImFontGlyphPtr glyph = font.FindGlyph(character);
+                if (glyph.NativePtr == null)
+                {
+                    cursor.X += font.GetCharAdvance(character) * scale;
+                    continue;
+                }
+
+                Vector2 p0 = new(cursor.X + glyph.X0 * scale, position.Y + glyph.Y0 * scale);
+                Vector2 p1 = new(cursor.X + glyph.X1 * scale, position.Y + glyph.Y0 * scale);
+                Vector2 p2 = new(cursor.X + glyph.X1 * scale, position.Y + glyph.Y1 * scale);
+                Vector2 p3 = new(cursor.X + glyph.X0 * scale, position.Y + glyph.Y1 * scale);
+                float x = Math.Clamp(
+                    (cursor.X - position.X + glyph.AdvanceX * scale * 0.5f)
+                        / Math.Max(1f, measure.X),
+                    0f,
+                    1f);
+                uint glyphColor = GradientColorU32(gradient, x, 0.5f, 1f);
+                drawList.AddImageQuad(
+                    textureId,
+                    p0,
+                    p1,
+                    p2,
+                    p3,
+                    new Vector2(glyph.U0, glyph.V0),
+                    new Vector2(glyph.U1, glyph.V0),
+                    new Vector2(glyph.U1, glyph.V1),
+                    new Vector2(glyph.U0, glyph.V1),
+                    glyphColor);
+                cursor.X += glyph.AdvanceX * scale;
+            }
+        }
+        finally
+        {
+            drawList.PopTextureID();
+        }
     }
 
     private static uint ColorU32(float[] color, float alpha)
@@ -964,6 +1144,12 @@ internal static class KeyViewerRuntime
         float b = color.Length > 2 ? color[2] : 1f;
         float a = (color.Length > 3 ? color[3] : 1f) * alpha;
         return ImGui.ColorConvertFloat4ToU32(new Vector4(r, g, b, Math.Clamp(a, 0f, 1f)));
+    }
+
+    private static uint ColorU32(Vector4 color, float alpha = 1f)
+    {
+        color.W = Math.Clamp(color.W * alpha, 0f, 1f);
+        return ImGui.ColorConvertFloat4ToU32(color);
     }
 
     private static string FormatCount(int value, bool format)
@@ -977,6 +1163,106 @@ internal static class KeyViewerRuntime
         Outline,
         Text,
     }
+
+    private static void DrawKeyBox(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        float[] background,
+        KeyViewerColorGradient? backgroundGradient,
+        float[] outline,
+        KeyViewerColorGradient? outlineGradient,
+        float rounding,
+        float outlineThickness)
+    {
+        if (backgroundGradient is not { Enabled: true }
+            && outlineGradient is not { Enabled: true })
+        {
+            drawList.AddRectFilled(min, max, ColorU32(background, 1f), rounding);
+            drawList.AddRect(
+                min,
+                max,
+                ColorU32(outline, 1f),
+                rounding,
+                ImDrawFlags.None,
+                outlineThickness);
+            return;
+        }
+
+        AddGradientRect(drawList, min, max, outline, outlineGradient, 1f, 1f);
+        float inset = Math.Clamp(outlineThickness, 0.5f, Math.Min(max.X - min.X, max.Y - min.Y) * 0.5f);
+        Vector2 innerMin = min + new Vector2(inset);
+        Vector2 innerMax = max - new Vector2(inset);
+        if (innerMax.X > innerMin.X && innerMax.Y > innerMin.Y)
+            AddGradientRect(drawList, innerMin, innerMax, background, backgroundGradient, 1f, 1f);
+    }
+
+    private static void AddGradientRect(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        float[] flatColor,
+        KeyViewerColorGradient? gradient,
+        float topAlpha,
+        float bottomAlpha)
+    {
+        if (gradient is not { Enabled: true })
+        {
+            if (MathF.Abs(topAlpha - bottomAlpha) <= 0.001f)
+                drawList.AddRectFilled(min, max, ColorU32(flatColor, topAlpha));
+            else
+                drawList.AddRectFilledMultiColor(
+                    min,
+                    max,
+                    ColorU32(flatColor, topAlpha),
+                    ColorU32(flatColor, topAlpha),
+                    ColorU32(flatColor, bottomAlpha),
+                    ColorU32(flatColor, bottomAlpha));
+            return;
+        }
+
+        drawList.AddRectFilledMultiColor(
+            min,
+            max,
+            GradientColorU32(gradient, 0f, 0f, topAlpha),
+            GradientColorU32(gradient, 1f, 0f, topAlpha),
+            GradientColorU32(gradient, 1f, 1f, bottomAlpha),
+            GradientColorU32(gradient, 0f, 1f, bottomAlpha));
+    }
+
+    private static uint GradientColorU32(
+        KeyViewerColorGradient gradient,
+        float x,
+        float y,
+        float alpha)
+    {
+        x = Math.Clamp(x, 0f, 1f);
+        y = Math.Clamp(y, 0f, 1f);
+        float r = Bilinear(gradient, 0, x, y);
+        float g = Bilinear(gradient, 1, x, y);
+        float b = Bilinear(gradient, 2, x, y);
+        float a = Bilinear(gradient, 3, x, y);
+        return ColorU32(new Vector4(r, g, b, a), alpha);
+    }
+
+    private static float Bilinear(KeyViewerColorGradient gradient, int channel, float x, float y)
+    {
+        float topLeft = GradientChannel(gradient.TopLeft, channel);
+        float topRight = GradientChannel(gradient.TopRight, channel);
+        float bottomLeft = GradientChannel(gradient.BottomLeft, channel);
+        float bottomRight = GradientChannel(gradient.BottomRight, channel);
+        float top = topLeft + (topRight - topLeft) * x;
+        float bottom = bottomLeft + (bottomRight - bottomLeft) * x;
+        return top + (bottom - top) * y;
+    }
+
+    private static float GradientChannel(float[] color, int channel)
+        => color.Length > channel ? Math.Clamp(color[channel], 0f, 1f) : 1f;
+
+    private static float[] ResolveColor(float[] fallback, KeyViewerColorGradient? gradient)
+        => gradient is { Enabled: true } && gradient.TopLeft.Length >= 4
+            ? gradient.TopLeft
+            : fallback;
 
     private static float[] GetKeyColor(KeyViewerSettings settings, int slot, bool pressed, ColorRole role)
     {
@@ -1000,12 +1286,77 @@ internal static class KeyViewerRuntime
         };
     }
 
+    private static KeyViewerColorGradient? GetKeyGradient(
+        KeyViewerSettings settings,
+        int slot,
+        bool pressed,
+        ColorRole role)
+    {
+        if (settings.EnablePerKeyColors && slot >= 0 && slot < settings.PerKeyBackgroundGradients.Length)
+        {
+            KeyViewerColorGradient[] values = role switch
+            {
+                ColorRole.Background => pressed
+                    ? settings.PerKeyBackgroundPressedGradients
+                    : settings.PerKeyBackgroundGradients,
+                ColorRole.Outline => pressed
+                    ? settings.PerKeyOutlinePressedGradients
+                    : settings.PerKeyOutlineGradients,
+                _ => pressed
+                    ? settings.PerKeyTextPressedGradients
+                    : settings.PerKeyTextGradients,
+            };
+            if (slot < values.Length && values[slot] is { Enabled: true } value)
+                return value;
+        }
+
+        KeyViewerColorGradient? global = role switch
+        {
+            ColorRole.Background => pressed ? settings.BackgroundPressedGradient : settings.BackgroundGradient,
+            ColorRole.Outline => pressed ? settings.OutlinePressedGradient : settings.OutlineGradient,
+            _ => pressed ? settings.TextPressedGradient : settings.TextGradient,
+        };
+        return global is { Enabled: true } ? global : null;
+    }
+
+    private static KeyViewerColorGradient? GetStatusGradient(
+        KeyViewerSettings settings,
+        bool total,
+        ColorRole role)
+    {
+        KeyViewerColorGradient global = total
+            ? role switch
+            {
+                ColorRole.Background => settings.TotalBackgroundGradient,
+                ColorRole.Outline => settings.TotalOutlineGradient,
+                _ => settings.TotalTextGradient,
+            }
+            : role switch
+            {
+                ColorRole.Background => settings.KpsBackgroundGradient,
+                ColorRole.Outline => settings.KpsOutlineGradient,
+                _ => settings.KpsTextGradient,
+            };
+        return global is { Enabled: true } ? global : null;
+    }
+
     private static float[] GetRainColor(KeyViewerSettings settings, RainDrop drop)
     {
         int slot = SlotIndex(drop.Index, drop.Foot);
         return settings.EnablePerKeyColors && slot >= 0 && slot < settings.PerKeyRainColor.Length
             && settings.PerKeyRainColor[slot] is { Length: >= 4 } value
             ? value : settings.RainColor;
+    }
+
+    private static KeyViewerColorGradient? GetRainGradient(KeyViewerSettings settings, RainDrop drop)
+    {
+        int slot = SlotIndex(drop.Index, drop.Foot);
+        if (settings.EnablePerKeyColors
+            && slot >= 0
+            && slot < settings.PerKeyRainGradients.Length
+            && settings.PerKeyRainGradients[slot] is { Enabled: true } value)
+            return value;
+        return settings.RainGradient is { Enabled: true } ? settings.RainGradient : null;
     }
 
     private static Queue<float>[] CreateSlotQueues()
@@ -1023,5 +1374,10 @@ internal static class KeyViewerRuntime
     private static void DrainReplayTouchEvents()
     {
         while (ReplayTouchEvents.TryDequeue(out _)) { }
+    }
+
+    private static void DrainReplayKeyboardEvents()
+    {
+        while (ReplayKeyboardEvents.TryDequeue(out _)) { }
     }
 }

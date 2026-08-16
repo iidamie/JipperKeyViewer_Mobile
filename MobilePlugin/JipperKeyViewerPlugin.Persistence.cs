@@ -3,8 +3,8 @@ using StArray.ModManager.Inspector;
 namespace JipperKeyViewer.Mobile;
 
 // ModManager's generic Save button persists explicitly marked members on the
-// plugin instance. Keep these proxies flat so its settings.json matches the
-// format written by SettingsStore.Save(Settings).
+// plugin instance. Counts deliberately have no proxy: counts.json is their
+// only source of truth and must not be restored from settings.json.
 public sealed partial class JipperKeyViewerPlugin
 {
     [ModSetting] private KeyLayout Layout { get => Settings.Layout; set => Settings.Layout = value; }
@@ -44,12 +44,13 @@ public sealed partial class JipperKeyViewerPlugin
     [ModSetting] private float PositionY { get => Settings.PositionY; set => Settings.PositionY = value; }
     [ModSetting] private float KeyGap { get => Settings.KeyGap; set => Settings.KeyGap = value; }
     [ModSetting] private int FootKeyCount { get => Settings.FootKeyCount; set => Settings.FootKeyCount = value; }
+    [ModSetting] private FootKeyPlacement FootPlacement { get => Settings.FootPlacement; set => Settings.FootPlacement = value; }
+    [ModSetting] private float FootPositionX { get => Settings.FootPositionX; set => Settings.FootPositionX = value; }
+    [ModSetting] private float FootPositionY { get => Settings.FootPositionY; set => Settings.FootPositionY = value; }
     [ModSetting] private string[] KeyBindings { get => Settings.KeyBindings; set => Settings.KeyBindings = value ?? Array.Empty<string>(); }
     [ModSetting] private string[] KeyLabels { get => Settings.KeyLabels; set => Settings.KeyLabels = value ?? Array.Empty<string>(); }
     [ModSetting] private string[] FootBindings { get => Settings.FootBindings; set => Settings.FootBindings = value ?? Array.Empty<string>(); }
     [ModSetting] private string[] FootLabels { get => Settings.FootLabels; set => Settings.FootLabels = value ?? Array.Empty<string>(); }
-    [ModSetting] private int[] Counts { get => Settings.Counts; set => Settings.Counts = value ?? Array.Empty<int>(); }
-    [ModSetting] private int TotalCount { get => Settings.TotalCount; set => Settings.TotalCount = value; }
     [ModSetting] private float[] Background { get => Settings.Background; set => Settings.Background = value ?? Array.Empty<float>(); }
     [ModSetting] private float[] BackgroundPressed { get => Settings.BackgroundPressed; set => Settings.BackgroundPressed = value ?? Array.Empty<float>(); }
     [ModSetting] private float[] Outline { get => Settings.Outline; set => Settings.Outline = value ?? Array.Empty<float>(); }
@@ -71,6 +72,26 @@ public sealed partial class JipperKeyViewerPlugin
     [ModSetting] private float[][] PerKeyText { get => Settings.PerKeyText; set => Settings.PerKeyText = value ?? Array.Empty<float[]>(); }
     [ModSetting] private float[][] PerKeyTextPressed { get => Settings.PerKeyTextPressed; set => Settings.PerKeyTextPressed = value ?? Array.Empty<float[]>(); }
     [ModSetting] private float[][] PerKeyRainColor { get => Settings.PerKeyRainColor; set => Settings.PerKeyRainColor = value ?? Array.Empty<float[]>(); }
+    [ModSetting] private KeyViewerColorGradient BackgroundGradient { get => Settings.BackgroundGradient; set => Settings.BackgroundGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient BackgroundPressedGradient { get => Settings.BackgroundPressedGradient; set => Settings.BackgroundPressedGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient OutlineGradient { get => Settings.OutlineGradient; set => Settings.OutlineGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient OutlinePressedGradient { get => Settings.OutlinePressedGradient; set => Settings.OutlinePressedGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient TextGradient { get => Settings.TextGradient; set => Settings.TextGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient TextPressedGradient { get => Settings.TextPressedGradient; set => Settings.TextPressedGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient RainGradient { get => Settings.RainGradient; set => Settings.RainGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient KpsBackgroundGradient { get => Settings.KpsBackgroundGradient; set => Settings.KpsBackgroundGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient KpsOutlineGradient { get => Settings.KpsOutlineGradient; set => Settings.KpsOutlineGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient KpsTextGradient { get => Settings.KpsTextGradient; set => Settings.KpsTextGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient TotalBackgroundGradient { get => Settings.TotalBackgroundGradient; set => Settings.TotalBackgroundGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient TotalOutlineGradient { get => Settings.TotalOutlineGradient; set => Settings.TotalOutlineGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient TotalTextGradient { get => Settings.TotalTextGradient; set => Settings.TotalTextGradient = value ?? new KeyViewerColorGradient(); }
+    [ModSetting] private KeyViewerColorGradient[] PerKeyBackgroundGradients { get => Settings.PerKeyBackgroundGradients; set => Settings.PerKeyBackgroundGradients = value ?? Array.Empty<KeyViewerColorGradient>(); }
+    [ModSetting] private KeyViewerColorGradient[] PerKeyBackgroundPressedGradients { get => Settings.PerKeyBackgroundPressedGradients; set => Settings.PerKeyBackgroundPressedGradients = value ?? Array.Empty<KeyViewerColorGradient>(); }
+    [ModSetting] private KeyViewerColorGradient[] PerKeyOutlineGradients { get => Settings.PerKeyOutlineGradients; set => Settings.PerKeyOutlineGradients = value ?? Array.Empty<KeyViewerColorGradient>(); }
+    [ModSetting] private KeyViewerColorGradient[] PerKeyOutlinePressedGradients { get => Settings.PerKeyOutlinePressedGradients; set => Settings.PerKeyOutlinePressedGradients = value ?? Array.Empty<KeyViewerColorGradient>(); }
+    [ModSetting] private KeyViewerColorGradient[] PerKeyTextGradients { get => Settings.PerKeyTextGradients; set => Settings.PerKeyTextGradients = value ?? Array.Empty<KeyViewerColorGradient>(); }
+    [ModSetting] private KeyViewerColorGradient[] PerKeyTextPressedGradients { get => Settings.PerKeyTextPressedGradients; set => Settings.PerKeyTextPressedGradients = value ?? Array.Empty<KeyViewerColorGradient>(); }
+    [ModSetting] private KeyViewerColorGradient[] PerKeyRainGradients { get => Settings.PerKeyRainGradients; set => Settings.PerKeyRainGradients = value ?? Array.Empty<KeyViewerColorGradient>(); }
     [ModSetting] private KeyViewerFont Font { get => Settings.Font; set => Settings.Font = value; }
     [ModSetting] private string CustomFontFile { get => Settings.CustomFontFile; set => Settings.CustomFontFile = value ?? string.Empty; }
 }

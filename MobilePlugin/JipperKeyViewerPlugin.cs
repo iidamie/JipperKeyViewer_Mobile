@@ -29,6 +29,11 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
     private int _appearanceKeyIndex;
     private bool _appearanceKeyFoot;
     private string[] _customFonts = Array.Empty<string>();
+    private BindingCapture? _bindingCapture;
+    private bool _touchInputSubscribed;
+    private bool _keyboardInputActive;
+
+    private readonly record struct BindingCapture(bool Foot, int Index);
 
     public JipperKeyViewerPlugin()
     {
@@ -45,7 +50,7 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
     public string Id => "JipperKeyViewer";
     public string Name => "Jipper Key Viewer Mobile";
-    public string Version => "1.7.0-mobile.19";
+    public string Version => "1.7.0-mobile.20";
     public string Author => "HitMargin / mobile port";
     public string Description => "Jipper Key Viewer touch and keyboard overlay for ADOFAI Android";
     public IReadOnlyList<string> Dependencies => Array.Empty<string>();
@@ -57,6 +62,7 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
         Settings.Normalize();
         _replayApi.TryBind();
         KeyViewerFontRuntime.Reset();
+        KeyViewerKeyboardInput.Reset();
         KeyViewerRuntime.Reset(Settings);
         _settingsPanelDrawnThisFrame = false;
         _lastSavedTotalCount = Settings.TotalCount;
@@ -67,7 +73,7 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
             && _customFonts.Length > 0)
             Settings.CustomFontFile = _customFonts[0];
         _updateService.StartAutomaticCheck();
-        InputEvents.OnTouch += OnTouch;
+        SyncInputReceivers();
         TryResolveGame();
         PluginLog.Info("Loaded mobile ImGui overlay");
     }
@@ -75,11 +81,13 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
     public void OnUnload()
     {
         _loaded = false;
+        SyncInputReceivers();
         _replayApi.Dispose();
-        InputEvents.OnTouch -= OnTouch;
+        KeyViewerNativeKeyboardKeyEventHook.Uninstall();
         _updateService?.Dispose();
         _updateService = null;
         KeyViewerFontRuntime.Reset();
+        KeyViewerKeyboardInput.Reset();
         KeyViewerRuntime.Reset(Settings);
         _game = null;
         _settingsPanelDrawnThisFrame = false;
@@ -110,7 +118,7 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
     private void OnTouch(TouchEventInfo info)
     {
-        if (_loaded && !_replayApi.IsPlaybackActive)
+        if (_loaded && Settings.TouchInputEnabled && !_replayApi.IsPlaybackActive)
             KeyViewerRuntime.EnqueueTouch(info);
     }
 
@@ -123,9 +131,13 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
     private void RenderFrame(ImDrawListPtr drawList)
     {
         if (!_loaded) return;
+        _replayApi.TryBind();
+        SyncInputReceivers();
         if (!Settings.Enabled)
         {
             KeyViewerRuntime.ResetInputState();
+            UpdateKeyboardInput();
+            ApplyBindingCapture();
             return;
         }
         long now = Environment.TickCount64;
@@ -139,8 +151,9 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
         _lastFrameTicks = now;
         try
         {
-            _replayApi.TryBind();
-            KeyViewerRuntime.Update(this, delta, _replayApi.IsPlaybackActive);
+            bool replayPlayback = _replayApi.IsPlaybackActive;
+            KeyViewerRuntime.Update(this, delta, replayPlayback);
+            ApplyBindingCapture();
             AutoSaveCounts(now);
             KeyViewerRuntime.Render(this, drawList);
         }
@@ -154,8 +167,12 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
     {
         _settingsPanelDrawnThisFrame = true;
         Settings.Normalize();
+        SyncInputReceivers();
+        UpdateKeyboardInput();
+        ApplyBindingCapture();
         ImGui.TextUnformatted("Jipper Key Viewer Mobile");
         ImGui.TextDisabled(_game == null ? "waiting for ADOFAI runtime" : "runtime ready");
+        ImGui.TextDisabled(KeyViewerKeyboardInput.GetDiagnosticsStatus());
         ImGui.Separator();
 
         if (ImGui.Button("Clear counts##jipper-actions-clear"))
@@ -172,6 +189,27 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
             _notice = "Settings saved";
             _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
         }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Dump keyboard diagnostics##jipper-actions-keyboard-diagnostics"))
+        {
+            KeyViewerKeyboardDiagnostics.FlushPeriodic(force: true);
+            _notice = "Keyboard diagnostics written to manager log";
+            _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
+        }
+        ImGui.SameLine();
+        bool keyboardInputAvailable = IsKeyboardInputRequested();
+        if (!keyboardInputAvailable)
+            ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Try native keyboard fallback##jipper-actions-keyboard-native"))
+        {
+            bool installed = KeyViewerNativeKeyboardKeyEventHook.Install();
+            _notice = installed
+                ? "Native keyboard fallback enabled"
+                : "Native keyboard fallback unavailable";
+            _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
+        }
+        if (!keyboardInputAvailable)
+            ImGui.EndDisabled();
         if (DateTime.UtcNow < _noticeUntilUtc)
             ImGui.TextDisabled(_notice);
 
@@ -213,12 +251,19 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
         ImGui.Checkbox("Enabled", ref Settings.Enabled);
         ImGui.Checkbox("Show only in gameplay", ref Settings.ShowOnlyInGameplay);
-        ImGui.Checkbox("Enable touch mapping", ref Settings.TouchInputEnabled);
+        bool touchInputChanged = ImGui.Checkbox("Receive touch input", ref Settings.TouchInputEnabled);
         ImGui.Checkbox("Show touch regions", ref Settings.ShowTouchRegions);
         ImGui.Checkbox("Touch foot area", ref Settings.TouchFootAreaEnabled);
         if (Settings.TouchFootAreaEnabled)
             ImGui.SliderFloat("Touch foot height", ref Settings.TouchFootAreaHeight, 0.08f, 0.35f, "%.2f");
-        ImGui.Checkbox("Keyboard input", ref Settings.KeyboardInputEnabled);
+        bool keyboardInputChanged = ImGui.Checkbox("Receive keyboard input", ref Settings.KeyboardInputEnabled);
+        if (keyboardInputChanged && !Settings.KeyboardInputEnabled)
+            EndBindingCapture();
+        if (touchInputChanged || keyboardInputChanged)
+        {
+            KeyViewerRuntime.ResetInputState();
+            SyncInputReceivers();
+        }
         ImGui.Checkbox("Show KPS", ref Settings.ShowKps);
         ImGui.Checkbox("Show total", ref Settings.ShowTotal);
         ImGui.Checkbox("Streamer mode", ref Settings.StreamerMode);
@@ -240,11 +285,29 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
         ImGui.SliderFloat("Vertical position", ref Settings.PositionY, 0f, 1f, "%.2f");
         ImGui.SliderFloat("Key gap", ref Settings.KeyGap, 1f, 12f, "%.1f");
         int footCount = Settings.FootKeyCount;
-        if (ImGui.SliderInt("Foot keys", ref footCount, 0, 8))
+        if (ImGui.SliderInt("Foot keys", ref footCount, 0, 16))
         {
             Settings.FootKeyCount = footCount;
             Settings.Normalize();
             KeyViewerRuntime.ResetInputState();
+        }
+        string[] footPlacementNames =
+        {
+            "Above KPS / Total",
+            "Between KPS / Total",
+            "Custom position",
+        };
+        int footPlacement = (int)Settings.FootPlacement;
+        if (ImGui.Combo("Foot placement", ref footPlacement, footPlacementNames, footPlacementNames.Length))
+        {
+            Settings.FootPlacement = (FootKeyPlacement)footPlacement;
+            Settings.Normalize();
+            KeyViewerRuntime.ResetInputState();
+        }
+        if (Settings.FootPlacement == FootKeyPlacement.Custom)
+        {
+            ImGui.SliderFloat("Foot horizontal position", ref Settings.FootPositionX, 0f, 1f, "%.2f");
+            ImGui.SliderFloat("Foot vertical position", ref Settings.FootPositionY, 0f, 1f, "%.2f");
         }
         ImGui.EndTabItem();
     }
@@ -353,23 +416,23 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
         if (!ImGui.BeginTabItem("Colors"))
             return;
 
-        DrawColor("Key background", Settings.Background);
-        DrawColor("Key background (pressed)", Settings.BackgroundPressed);
-        DrawColor("Key outline", Settings.Outline);
-        DrawColor("Key outline (pressed)", Settings.OutlinePressed);
-        DrawColor("Key text", Settings.Text);
-        DrawColor("Key text (pressed)", Settings.TextPressed);
-        DrawColor("Rain", Settings.RainColor);
+        DrawColorStyle("Key background", Settings.Background, Settings.BackgroundGradient);
+        DrawColorStyle("Key background (pressed)", Settings.BackgroundPressed, Settings.BackgroundPressedGradient);
+        DrawColorStyle("Key outline", Settings.Outline, Settings.OutlineGradient);
+        DrawColorStyle("Key outline (pressed)", Settings.OutlinePressed, Settings.OutlinePressedGradient);
+        DrawColorStyle("Key text", Settings.Text, Settings.TextGradient);
+        DrawColorStyle("Key text (pressed)", Settings.TextPressed, Settings.TextPressedGradient);
+        DrawColorStyle("Rain", Settings.RainColor, Settings.RainGradient);
 
         ImGui.Separator();
         ImGui.TextUnformatted("KPS");
-        DrawColor("KPS background", Settings.KpsBackground);
-        DrawColor("KPS outline", Settings.KpsOutline);
-        DrawColor("KPS text", Settings.KpsText);
+        DrawColorStyle("KPS background", Settings.KpsBackground, Settings.KpsBackgroundGradient);
+        DrawColorStyle("KPS outline", Settings.KpsOutline, Settings.KpsOutlineGradient);
+        DrawColorStyle("KPS text", Settings.KpsText, Settings.KpsTextGradient);
         ImGui.TextUnformatted("Total");
-        DrawColor("Total background", Settings.TotalBackground);
-        DrawColor("Total outline", Settings.TotalOutline);
-        DrawColor("Total text", Settings.TotalText);
+        DrawColorStyle("Total background", Settings.TotalBackground, Settings.TotalBackgroundGradient);
+        DrawColorStyle("Total outline", Settings.TotalOutline, Settings.TotalOutlineGradient);
+        DrawColorStyle("Total text", Settings.TotalText, Settings.TotalTextGradient);
 
         ImGui.Separator();
         ImGui.Checkbox("Per-key colors", ref Settings.EnablePerKeyColors);
@@ -379,13 +442,34 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
             int slot = AppearanceSlot();
             if (slot >= 0 && slot < Settings.PerKeyBackground.Length)
             {
-                DrawColor("Selected background", Settings.PerKeyBackground[slot]);
-                DrawColor("Selected background (pressed)", Settings.PerKeyBackgroundPressed[slot]);
-                DrawColor("Selected outline", Settings.PerKeyOutline[slot]);
-                DrawColor("Selected outline (pressed)", Settings.PerKeyOutlinePressed[slot]);
-                DrawColor("Selected text", Settings.PerKeyText[slot]);
-                DrawColor("Selected text (pressed)", Settings.PerKeyTextPressed[slot]);
-                DrawColor("Selected rain", Settings.PerKeyRainColor[slot]);
+                DrawColorStyle(
+                    "Selected background",
+                    Settings.PerKeyBackground[slot],
+                    Settings.PerKeyBackgroundGradients[slot]);
+                DrawColorStyle(
+                    "Selected background (pressed)",
+                    Settings.PerKeyBackgroundPressed[slot],
+                    Settings.PerKeyBackgroundPressedGradients[slot]);
+                DrawColorStyle(
+                    "Selected outline",
+                    Settings.PerKeyOutline[slot],
+                    Settings.PerKeyOutlineGradients[slot]);
+                DrawColorStyle(
+                    "Selected outline (pressed)",
+                    Settings.PerKeyOutlinePressed[slot],
+                    Settings.PerKeyOutlinePressedGradients[slot]);
+                DrawColorStyle(
+                    "Selected text",
+                    Settings.PerKeyText[slot],
+                    Settings.PerKeyTextGradients[slot]);
+                DrawColorStyle(
+                    "Selected text (pressed)",
+                    Settings.PerKeyTextPressed[slot],
+                    Settings.PerKeyTextPressedGradients[slot]);
+                DrawColorStyle(
+                    "Selected rain",
+                    Settings.PerKeyRainColor[slot],
+                    Settings.PerKeyRainGradients[slot]);
             }
         }
         ImGui.EndTabItem();
@@ -437,30 +521,61 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
             : _appearanceKeyFoot ? 24 + _appearanceKeyIndex : _appearanceKeyIndex;
 
     private static string PrettyBindingName(string binding)
-        => string.IsNullOrWhiteSpace(binding) ? "-" : binding switch
-        {
-            "Backspace" => "Back",
-            "CapsLock" => "Caps",
-            "LeftShift" => "LShift",
-            "RightShift" => "RShift",
-            "LeftCtrl" => "LCtrl",
-            "RightCtrl" => "RCtrl",
-            "Equal" => "=",
-            "Comma" => ",",
-            "Period" => ".",
-            _ when binding.StartsWith('_') && binding.Length == 2 => binding[1..],
-            _ => binding,
-        };
+        => KeyViewerKeyMap.GetDisplayName(binding);
 
-    private static void DrawColor(string label, float[] value)
+    private static void DrawColorStyle(
+        string label,
+        float[] value,
+        KeyViewerColorGradient gradient)
     {
-        if (value == null || value.Length < 4) return;
+        if (value == null || value.Length < 4 || gradient == null) return;
+        gradient.Normalize(value);
+        if (!ImGui.TreeNode(label)) return;
+
+        ImGui.PushID(label);
+        bool enabled = gradient.Enabled;
+        if (ImGui.Checkbox("Gradient", ref enabled))
+            gradient.Enabled = enabled;
+
+        if (!gradient.Enabled)
+        {
+            if (DrawColor("Color", value))
+                gradient.SetFlat(value);
+        }
+        else
+        {
+            DrawColor("Top left", gradient.TopLeft);
+            DrawColor("Top right", gradient.TopRight);
+            DrawColor("Bottom left", gradient.BottomLeft);
+            DrawColor("Bottom right", gradient.BottomRight);
+            CopyColor(gradient.TopLeft, value);
+        }
+
+        ImGui.PopID();
+        ImGui.TreePop();
+    }
+
+    private static bool DrawColor(string label, float[] value)
+    {
+        if (value == null || value.Length < 4) return false;
         var color = new Vector4(value[0], value[1], value[2], value[3]);
-        if (!ImGui.ColorEdit4(label, ref color, ImGuiColorEditFlags.AlphaBar)) return;
+        if (!ImGui.ColorEdit4(
+                label,
+                ref color,
+                ImGuiColorEditFlags.AlphaBar | ImGuiColorEditFlags.AlphaPreviewHalf))
+            return false;
         value[0] = Math.Clamp(color.X, 0f, 1f);
         value[1] = Math.Clamp(color.Y, 0f, 1f);
         value[2] = Math.Clamp(color.Z, 0f, 1f);
         value[3] = Math.Clamp(color.W, 0f, 1f);
+        return true;
+    }
+
+    private static void CopyColor(float[] source, float[] target)
+    {
+        if (source.Length < 4 || target.Length < 4) return;
+        for (int i = 0; i < 4; i++)
+            target[i] = Math.Clamp(source[i], 0f, 1f);
     }
 
     private void DrawKeyBindingsTab()
@@ -468,6 +583,8 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
         if (!ImGui.BeginTabItem("Keys"))
             return;
 
+        if (_bindingCapture.HasValue)
+            ImGui.TextDisabled("Waiting for a keyboard key...");
         DrawBindingFields(Settings.CurrentBindings, Settings.CurrentLabels, false);
         if (Settings.FootKeyCount > 0)
         {
@@ -491,11 +608,11 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
     {
         if (Settings.TotalCount == _lastSavedTotalCount || now < _nextCountSaveTicks)
             return;
-        if (_settingsStore.SaveCounts(Settings))
+        if (_settingsStore.SaveCounts(Settings, durable: false))
         {
             _lastSavedTotalCount = Settings.TotalCount;
-            _nextCountSaveTicks = now + 250;
         }
+        _nextCountSaveTicks = now + 1500;
     }
 
     private void SaveSettingsNow()
@@ -504,20 +621,121 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
             _lastSavedTotalCount = Settings.TotalCount;
     }
 
-    private static void DrawBindingFields(string[] bindings, string[] labels, bool foot)
+    private void DrawBindingFields(string[] bindings, string[] labels, bool foot)
     {
         for (int i = 0; i < bindings.Length; i++)
         {
             ImGui.PushID((foot ? "foot" : "main") + i.ToString());
-            string binding = bindings[i];
-            ImGui.SetNextItemWidth(-1f);
-            if (ImGui.InputText($"Key {i + 1} binding", ref binding, 32))
-                bindings[i] = binding;
-            string label = labels[i];
-            ImGui.SetNextItemWidth(-1f);
+            bool capturing = _bindingCapture is { } active
+                && active.Foot == foot
+                && active.Index == i;
+            string buttonText = capturing
+                ? "Press a key..."
+                : $"Key {i + 1}: {KeyViewerKeyMap.GetDisplayName(bindings[i])}##binding-button";
+            float availableWidth = Math.Max(80f, ImGui.GetContentRegionAvail().X);
+            float cancelReserve = capturing
+                ? ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.X
+                : 0f;
+            float bindingWidth = Math.Min(
+                240f,
+                Math.Max(80f, availableWidth - cancelReserve));
+            if (ImGui.Button(buttonText, new Vector2(bindingWidth, 0f)))
+            {
+                KeyViewerKeyboardInput.ClearPendingPresses();
+                KeyViewerKeyboardInput.SetCaptureMode(true);
+                _bindingCapture = new BindingCapture(foot, i);
+                KeyViewerKeyboardDiagnostics.RecordCaptureStarted();
+                SyncInputReceivers();
+            }
+            if (capturing)
+            {
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Cancel##binding-cancel"))
+                {
+                    EndBindingCapture();
+                }
+            }
+            string label = labels[i] ?? string.Empty;
+            ImGui.SetNextItemWidth(Math.Min(300f, availableWidth));
             if (ImGui.InputText("Label (optional)", ref label, 32))
                 labels[i] = label;
             ImGui.PopID();
+        }
+    }
+
+    private void ApplyBindingCapture()
+    {
+        if (_bindingCapture is not { } capture)
+            return;
+        if (!KeyViewerKeyboardInput.TryTakePressed(out KeyboardPress press))
+            return;
+
+        string binding = KeyViewerKeyMap.GetBindingName(press.Key);
+        if (binding.Length == 0)
+            return;
+
+        string[] bindings = capture.Foot ? Settings.FootBindings : Settings.KeyBindings;
+        if ((uint)capture.Index >= (uint)bindings.Length)
+        {
+            EndBindingCapture();
+            return;
+        }
+
+        bindings[capture.Index] = binding;
+        EndBindingCapture();
+        Settings.Normalize();
+        PluginLog.Info(
+            $"Keyboard binding captured: {(capture.Foot ? "foot" : "main")}[{capture.Index}]={binding} "
+            + $"({KeyViewerKeyMap.GetDisplayName(binding)})");
+        _notice = $"Bound {KeyViewerKeyMap.GetDisplayName(binding)}";
+        _noticeUntilUtc = DateTime.UtcNow.AddSeconds(3);
+    }
+
+    private bool IsKeyboardInputRequested()
+        => Settings.KeyboardInputEnabled || _bindingCapture.HasValue;
+
+    private void UpdateKeyboardInput()
+    {
+        if (IsKeyboardInputRequested())
+            KeyViewerKeyboardInput.Update();
+    }
+
+    private void EndBindingCapture()
+    {
+        if (!_bindingCapture.HasValue)
+            return;
+        _bindingCapture = null;
+        KeyViewerKeyboardInput.SetCaptureMode(false);
+        SyncInputReceivers();
+    }
+
+    private void SyncInputReceivers()
+    {
+        bool receiveTouch = _loaded && Settings.TouchInputEnabled;
+        if (receiveTouch != _touchInputSubscribed)
+        {
+            if (receiveTouch)
+                InputEvents.OnTouch += OnTouch;
+            else
+                InputEvents.OnTouch -= OnTouch;
+            _touchInputSubscribed = receiveTouch;
+        }
+
+        _replayApi.ConfigureInputSubscriptions(
+            // Playback is a recorded input stream, not physical input. Keep
+            // it connected regardless of the live touch/keyboard switches.
+            receiveTouch: _loaded,
+            receiveKeyboard: _loaded);
+
+        bool receiveKeyboard = _loaded && IsKeyboardInputRequested();
+        if (receiveKeyboard == _keyboardInputActive)
+            return;
+
+        _keyboardInputActive = receiveKeyboard;
+        if (!receiveKeyboard)
+        {
+            KeyViewerNativeKeyboardKeyEventHook.Uninstall();
+            KeyViewerKeyboardInput.Reset();
         }
     }
 }

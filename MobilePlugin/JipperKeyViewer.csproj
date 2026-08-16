@@ -4,7 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>JipperKeyViewer</AssemblyName>
     <RootNamespace>JipperKeyViewer.Mobile</RootNamespace>
-    <Version>1.7.0-mobile.19</Version>
+    <Version>1.7.0-mobile.20</Version>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
