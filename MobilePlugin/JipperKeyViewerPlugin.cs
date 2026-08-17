@@ -32,6 +32,9 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
     private BindingCapture? _bindingCapture;
     private bool _touchInputSubscribed;
     private bool _keyboardInputActive;
+    private int[]? _replayV2CountSnapshot;
+    private int _replayV2TotalSnapshot;
+    private long _replayV2StatisticsGeneration;
 
     private readonly record struct BindingCapture(bool Foot, int Index);
 
@@ -83,6 +86,7 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
         _loaded = false;
         SyncInputReceivers();
         _replayApi.Dispose();
+        RestoreReplayV2Statistics();
         KeyViewerNativeKeyboardKeyEventHook.Uninstall();
         _updateService?.Dispose();
         _updateService = null;
@@ -152,7 +156,11 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
         try
         {
             bool replayPlayback = _replayApi.IsPlaybackActive;
-            KeyViewerRuntime.Update(this, delta, replayPlayback);
+            KeyViewerRuntime.Update(
+                this,
+                delta,
+                replayPlayback,
+                _replayApi.IsV2PlaybackActive);
             ApplyBindingCapture();
             AutoSaveCounts(now);
             KeyViewerRuntime.Render(this, drawList);
@@ -606,6 +614,8 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
     private void AutoSaveCounts(long now)
     {
+        if (_replayV2CountSnapshot != null)
+            return;
         if (Settings.TotalCount == _lastSavedTotalCount || now < _nextCountSaveTicks)
             return;
         if (_settingsStore.SaveCounts(Settings, durable: false))
@@ -617,8 +627,63 @@ public sealed partial class JipperKeyViewerPlugin : IModPlugin, IModSettings
 
     private void SaveSettingsNow()
     {
-        if (_settingsStore.Save(Settings))
-            _lastSavedTotalCount = Settings.TotalCount;
+        if (_replayV2CountSnapshot == null)
+        {
+            if (_settingsStore.Save(Settings))
+                _lastSavedTotalCount = Settings.TotalCount;
+            return;
+        }
+
+        var activeCounts = (int[])Settings.Counts.Clone();
+        var activeTotal = Settings.TotalCount;
+        try
+        {
+            Array.Copy(
+                _replayV2CountSnapshot,
+                Settings.Counts,
+                Math.Min(_replayV2CountSnapshot.Length, Settings.Counts.Length));
+            Settings.TotalCount = _replayV2TotalSnapshot;
+            if (_settingsStore.Save(Settings))
+                _lastSavedTotalCount = _replayV2TotalSnapshot;
+        }
+        finally
+        {
+            Array.Copy(activeCounts, Settings.Counts, Settings.Counts.Length);
+            Settings.TotalCount = activeTotal;
+        }
+    }
+
+    internal void OnReplayV2Started(long sessionGeneration)
+    {
+        if (_replayV2CountSnapshot != null &&
+            _replayV2StatisticsGeneration == sessionGeneration)
+            return;
+        RestoreReplayV2Statistics();
+        _replayV2CountSnapshot = (int[])Settings.Counts.Clone();
+        _replayV2TotalSnapshot = Settings.TotalCount;
+        _replayV2StatisticsGeneration = sessionGeneration;
+    }
+
+    internal void OnReplayV2Ended(long sessionGeneration)
+    {
+        if (_replayV2StatisticsGeneration != sessionGeneration)
+            return;
+        RestoreReplayV2Statistics();
+        _replayApi.AcknowledgeV2Ended(sessionGeneration);
+    }
+
+    private void RestoreReplayV2Statistics()
+    {
+        var snapshot = _replayV2CountSnapshot;
+        if (snapshot == null)
+            return;
+        Array.Clear(Settings.Counts);
+        Array.Copy(snapshot, Settings.Counts, Math.Min(snapshot.Length, Settings.Counts.Length));
+        Settings.TotalCount = _replayV2TotalSnapshot;
+        _lastSavedTotalCount = Settings.TotalCount;
+        _replayV2CountSnapshot = null;
+        _replayV2TotalSnapshot = 0;
+        _replayV2StatisticsGeneration = 0;
     }
 
     private void DrawBindingFields(string[] bindings, string[] labels, bool foot)

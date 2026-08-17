@@ -1,15 +1,16 @@
 using System.Reflection;
 using StArray.ModManager.Android.Native;
-using StArray.ModManager.Manager;
+using StArray.ModManager.Interop;
 
 namespace JipperKeyViewer.Mobile;
 
-/// <summary>Optional reflection binding so Replay remains a non-required Mod.</summary>
+/// <summary>VirtualInput V2 consumer with the private Replay V1 reflection protocol as fallback.</summary>
 internal sealed class ReplayApiBinding
 {
     private const string ApiTypeName = "Replay.Mobile.ReplayKeyViewerApi";
 
     private PropertyInfo? _activeProperty;
+    private PropertyInfo? _v2ActiveProperty;
     private EventInfo? _startedEvent;
     private EventInfo? _endedEvent;
     private EventInfo? _touchEvent;
@@ -18,18 +19,26 @@ internal sealed class ReplayApiBinding
     private Delegate? _endedHandler;
     private Delegate? _touchHandler;
     private Delegate? _keyboardHandler;
+    private ModInteropSubscription? _v2Subscription;
     private long _nextProbeTick;
+    private long _v2SessionGeneration;
     private bool _bound;
+    private bool _v2Active;
+    private bool _suppressV1ForCurrentPlayback;
     private volatile bool _receiveTouch;
     private volatile bool _receiveKeyboard;
     private bool _touchSubscribed;
     private bool _keyboardSubscribed;
+
+    internal bool IsV2PlaybackActive => Volatile.Read(ref _v2Active);
 
     internal bool IsPlaybackActive
     {
         get
         {
             TryBind();
+            if (IsV2PlaybackActive)
+                return true;
             if (!_bound || _activeProperty == null)
                 return false;
             try { return _activeProperty.GetValue(null) is true; }
@@ -39,6 +48,7 @@ internal sealed class ReplayApiBinding
 
     internal void TryBind()
     {
+        TryBindV2();
         if (_bound || Environment.TickCount64 < _nextProbeTick)
             return;
         _nextProbeTick = Environment.TickCount64 + 500;
@@ -55,6 +65,9 @@ internal sealed class ReplayApiBinding
                 return;
 
             _activeProperty = api.GetProperty("IsPlaybackActive", BindingFlags.Public | BindingFlags.Static);
+            _v2ActiveProperty = api.GetProperty(
+                "IsVirtualInputV2Active",
+                BindingFlags.Public | BindingFlags.Static);
             _startedEvent = api.GetEvent("PlaybackStarted", BindingFlags.Public | BindingFlags.Static);
             _endedEvent = api.GetEvent("PlaybackEnded", BindingFlags.Public | BindingFlags.Static);
             _touchEvent = api.GetEvent("ReplayTouch", BindingFlags.Public | BindingFlags.Static);
@@ -80,12 +93,17 @@ internal sealed class ReplayApiBinding
             UpdateInputSubscriptions();
 
             if (IsActiveWithoutProbe())
-                KeyViewerRuntime.OnReplayStarted();
+            {
+                var suppress = IsV2PlaybackActive || (CanReceiveV2() && IsRemoteV2Active());
+                Volatile.Write(ref _suppressV1ForCurrentPlayback, suppress);
+                if (!suppress)
+                    KeyViewerRuntime.OnReplayStarted();
+            }
         }
         catch (Exception exception)
         {
-            Unbind();
-            PluginLog.Debug("Replay API binding deferred: " + exception.Message);
+            UnbindV1();
+            PluginLog.Debug("Replay V1 API binding deferred: " + exception.Message);
         }
     }
 
@@ -96,7 +114,85 @@ internal sealed class ReplayApiBinding
         UpdateInputSubscriptions();
     }
 
-    internal void Dispose() => Unbind();
+    internal void AcknowledgeV2Ended(long sessionGeneration)
+    {
+        if (Interlocked.Read(ref _v2SessionGeneration) != sessionGeneration)
+            return;
+        Volatile.Write(ref _v2Active, false);
+        Volatile.Write(ref _suppressV1ForCurrentPlayback, false);
+        Interlocked.Exchange(ref _v2SessionGeneration, 0);
+    }
+
+    internal void Dispose()
+    {
+        var generation = Interlocked.Exchange(ref _v2SessionGeneration, 0);
+        if (Volatile.Read(ref _v2Active))
+            KeyViewerRuntime.EnqueueReplayV2Batch(
+                new VirtualInputBatch(VirtualInputBatchKind.Ended, Math.Max(1, generation)));
+        Volatile.Write(ref _v2Active, false);
+        Volatile.Write(ref _suppressV1ForCurrentPlayback, false);
+        Interlocked.Exchange(ref _v2Subscription, null)?.Dispose();
+        UnbindV1();
+    }
+
+    private void TryBindV2()
+    {
+        if (_v2Subscription is { IsRetired: false })
+            return;
+        if (!ModInterop.TrySubscribe(
+                new InteropSubscriptionRequest(ModInteropConstants.VirtualInputPlaybackV2, 2)
+                {
+                    QueueCapacity = ModInteropConstants.VirtualInputQueueCapacity,
+                    DispatchContext = InteropDispatchContext.SerializedWorker
+                },
+                OnVirtualInput,
+                out var subscription,
+                out var error))
+        {
+            if (error.Code is not (InteropErrorCode.RuntimeUnavailable or
+                InteropErrorCode.GenerationMismatch))
+                PluginLog.Debug("VirtualInput V2 binding deferred: " + error);
+            return;
+        }
+        _v2Subscription = subscription;
+    }
+
+    private void OnVirtualInput(InteropMessage message)
+    {
+        var batch = message.VirtualInput;
+        if (batch == null)
+            return;
+        if (message.IsCancellation)
+        {
+            EndV2(batch.SessionGeneration);
+            return;
+        }
+        if (batch.Kind == VirtualInputBatchKind.Started)
+        {
+            var previous = Interlocked.Exchange(
+                ref _v2SessionGeneration,
+                batch.SessionGeneration);
+            if (previous > 0 && previous != batch.SessionGeneration)
+                KeyViewerRuntime.EnqueueReplayV2Batch(
+                    new VirtualInputBatch(VirtualInputBatchKind.Ended, previous));
+            Volatile.Write(ref _v2Active, true);
+            Volatile.Write(ref _suppressV1ForCurrentPlayback, true);
+            KeyViewerRuntime.EnqueueReplayV2Batch(batch);
+            return;
+        }
+        if (!Volatile.Read(ref _v2Active) ||
+            Interlocked.Read(ref _v2SessionGeneration) != batch.SessionGeneration)
+            return;
+        if (!KeyViewerRuntime.EnqueueReplayV2Batch(batch))
+            KeyViewerRuntime.ForceEndReplayV2(batch.SessionGeneration);
+    }
+
+    private void EndV2(long sessionGeneration)
+    {
+        if (Interlocked.Read(ref _v2SessionGeneration) != sessionGeneration)
+            return;
+        KeyViewerRuntime.ForceEndReplayV2(sessionGeneration);
+    }
 
     private bool IsActiveWithoutProbe()
     {
@@ -104,9 +200,33 @@ internal sealed class ReplayApiBinding
         catch { return false; }
     }
 
-    private void OnReplayStarted() => KeyViewerRuntime.OnReplayStarted();
+    private bool IsRemoteV2Active()
+    {
+        try { return _v2ActiveProperty?.GetValue(null) is true; }
+        catch { return false; }
+    }
 
-    private void OnReplayEnded() => KeyViewerRuntime.OnReplayEnded();
+    private bool CanReceiveV2()
+        => _v2Subscription is { IsRetired: false };
+
+    private bool ShouldSuppressV1()
+        => IsV2PlaybackActive || Volatile.Read(ref _suppressV1ForCurrentPlayback);
+
+    private void OnReplayStarted()
+    {
+        var suppress = IsV2PlaybackActive || (CanReceiveV2() && IsRemoteV2Active());
+        Volatile.Write(ref _suppressV1ForCurrentPlayback, suppress);
+        if (!suppress)
+            KeyViewerRuntime.OnReplayStarted();
+    }
+
+    private void OnReplayEnded()
+    {
+        var suppressed = ShouldSuppressV1();
+        Volatile.Write(ref _suppressV1ForCurrentPlayback, false);
+        if (!suppressed)
+            KeyViewerRuntime.OnReplayEnded();
+    }
 
     private void OnReplayTouch(
         int action,
@@ -116,7 +236,7 @@ internal sealed class ReplayApiBinding
         float sourceWidth,
         float sourceHeight)
     {
-        if (!_receiveTouch)
+        if (!_receiveTouch || ShouldSuppressV1())
             return;
         KeyViewerRuntime.EnqueueReplayTouch(
             (AndroidInput.MotionAction)action,
@@ -129,7 +249,7 @@ internal sealed class ReplayApiBinding
 
     private void OnReplayKeyboard(string binding, int action, int repeat)
     {
-        if (_receiveKeyboard)
+        if (_receiveKeyboard && !ShouldSuppressV1())
             KeyViewerRuntime.EnqueueReplayKeyboard(binding, action, repeat);
     }
 
@@ -163,7 +283,7 @@ internal sealed class ReplayApiBinding
         subscribed = shouldSubscribe;
     }
 
-    private void Unbind()
+    private void UnbindV1()
     {
         try
         {
@@ -179,6 +299,7 @@ internal sealed class ReplayApiBinding
         catch { }
 
         _activeProperty = null;
+        _v2ActiveProperty = null;
         _startedEvent = null;
         _endedEvent = null;
         _touchEvent = null;
@@ -188,6 +309,7 @@ internal sealed class ReplayApiBinding
         _touchHandler = null;
         _keyboardHandler = null;
         _bound = false;
+        Volatile.Write(ref _suppressV1ForCurrentPlayback, false);
         _touchSubscribed = false;
         _keyboardSubscribed = false;
     }
