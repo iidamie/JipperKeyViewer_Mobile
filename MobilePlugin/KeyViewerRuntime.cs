@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Numerics;
 using ImGuiNET;
 using StArray.ModManager.Android.Native;
+using StArray.ModManager.Interop;
 
 namespace JipperKeyViewer.Mobile;
 
@@ -12,6 +13,7 @@ internal static unsafe class KeyViewerRuntime
     private const int MaxFootKeys = 16;
     private const int MaxSlots = MaxMainKeys + MaxFootKeys;
     private const int TouchQueueCapacity = 1024;
+    private const int ReplayV2QueueCapacity = ModInteropConstants.VirtualInputQueueCapacity;
 
     private readonly record struct TouchBinding(int Index, bool Foot);
     private readonly record struct ReplayTouchEvent(
@@ -35,6 +37,7 @@ internal static unsafe class KeyViewerRuntime
     private static readonly ConcurrentQueue<TouchEventInfo> TouchEvents = new();
     private static readonly ConcurrentQueue<ReplayTouchEvent> ReplayTouchEvents = new();
     private static readonly ConcurrentQueue<ReplayKeyboardEvent> ReplayKeyboardEvents = new();
+    private static readonly ConcurrentQueue<VirtualInputBatch> ReplayV2Batches = new();
     private static readonly HashSet<ImGuiKey> ReplayDownKeys = new();
     private static readonly Dictionary<int, TouchBinding> ActivePointers = new();
     private static readonly Dictionary<int, TouchBinding> ReplayPointers = new();
@@ -72,6 +75,10 @@ internal static unsafe class KeyViewerRuntime
     private static int _footCount = -1;
     private static bool _active;
     private static bool _settingsPanelVisible;
+    private static int _replayV2QueuedEvents;
+    private static bool _replayV2Active;
+    private static long _replayV2SessionGeneration;
+    private static float _replayV2TimelineBase;
 
     internal static void Reset(KeyViewerSettings settings)
     {
@@ -79,6 +86,7 @@ internal static unsafe class KeyViewerRuntime
         DrainTouchEvents();
         DrainReplayTouchEvents();
         DrainReplayKeyboardEvents();
+        DrainReplayV2Batches();
         Array.Clear(TouchMainCounts);
         Array.Clear(TouchFootCounts);
         Array.Clear(KeyboardMainPressed);
@@ -108,14 +116,21 @@ internal static unsafe class KeyViewerRuntime
         _footCount = settings.FootKeyCount;
         _active = false;
         _settingsPanelVisible = false;
+        _replayV2Active = false;
+        _replayV2SessionGeneration = 0;
+        _replayV2TimelineBase = 0f;
     }
 
-    internal static void ResetInputState()
+    internal static void ResetInputState() => ResetInputState(preserveReplayV2Queue: false);
+
+    private static void ResetInputState(bool preserveReplayV2Queue)
     {
         KeyViewerKeyboardInput.ResetDownState();
         DrainTouchEvents();
         DrainReplayTouchEvents();
         DrainReplayKeyboardEvents();
+        if (!preserveReplayV2Queue)
+            DrainReplayV2Batches();
         ActivePointers.Clear();
         ReplayPointers.Clear();
         ReplayDownKeys.Clear();
@@ -133,6 +148,12 @@ internal static unsafe class KeyViewerRuntime
         PressTimes.Clear();
         foreach (Queue<float> queue in SlotPressTimes) queue.Clear();
         _kps = 0;
+        if (!preserveReplayV2Queue)
+        {
+            _replayV2Active = false;
+            _replayV2SessionGeneration = 0;
+            _replayV2TimelineBase = 0f;
+        }
     }
 
     internal static void ClearCounts(KeyViewerSettings settings)
@@ -176,7 +197,35 @@ internal static unsafe class KeyViewerRuntime
 
     internal static void OnReplayEnded() => ResetInputState();
 
-    internal static void Update(JipperKeyViewerPlugin plugin, float delta, bool replayPlayback)
+    internal static bool EnqueueReplayV2Batch(VirtualInputBatch batch)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        var weight = Math.Max(1, batch.Events.Count);
+        if (Interlocked.Add(ref _replayV2QueuedEvents, weight) > ReplayV2QueueCapacity)
+        {
+            Interlocked.Add(ref _replayV2QueuedEvents, -weight);
+            return false;
+        }
+        ReplayV2Batches.Enqueue(batch);
+        return true;
+    }
+
+    internal static void ForceEndReplayV2(long sessionGeneration)
+    {
+        DrainReplayV2Batches();
+        EnqueueReplayV2Batch(new VirtualInputBatch(
+            VirtualInputBatchKind.Cancelled,
+            Math.Max(1, sessionGeneration)));
+        EnqueueReplayV2Batch(new VirtualInputBatch(
+            VirtualInputBatchKind.Ended,
+            Math.Max(1, sessionGeneration)));
+    }
+
+    internal static void Update(
+        JipperKeyViewerPlugin plugin,
+        float delta,
+        bool replayPlayback,
+        bool replayV2Requested)
     {
         KeyViewerSettings settings = plugin.Settings;
         bool settingsPanelVisible = plugin.ConsumeSettingsPanelVisibility();
@@ -190,7 +239,7 @@ internal static unsafe class KeyViewerRuntime
         int footCount = Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys);
         if (_layout != (int)settings.Layout || _footCount != footCount)
         {
-            ResetInputState();
+            ResetInputState(preserveReplayV2Queue: replayV2Requested || _replayV2Active);
             _layout = (int)settings.Layout;
             _footCount = footCount;
         }
@@ -203,6 +252,8 @@ internal static unsafe class KeyViewerRuntime
             out _boundsMin,
             out _boundsMax);
         _time += Math.Clamp(delta, 0f, 0.25f);
+        ProcessReplayV2Batches(plugin, settings, display);
+        replayPlayback = replayPlayback || replayV2Requested || _replayV2Active;
         bool active = settings.Enabled && (_settingsPanelVisible
             || !settings.ShowOnlyInGameplay
             || plugin.IsGameplayActive());
@@ -218,7 +269,11 @@ internal static unsafe class KeyViewerRuntime
             ResetInputState();
         _active = true;
 
-        if (replayPlayback)
+        if (_replayV2Active)
+        {
+            ClearPhysicalTouchInputState();
+        }
+        else if (replayPlayback)
         {
             ClearPhysicalTouchInputState();
             ProcessReplayTouchEvents(settings, display);
@@ -547,7 +602,10 @@ internal static unsafe class KeyViewerRuntime
         }
     }
 
-    private static void ProcessKeyStates(KeyViewerSettings settings)
+    private static void ProcessKeyStates(
+        KeyViewerSettings settings,
+        float? eventTime = null,
+        bool countStatistics = true)
     {
         int mainCount = Defaults.Count(settings.Layout);
         for (int i = 0; i < mainCount; i++)
@@ -555,28 +613,144 @@ internal static unsafe class KeyViewerRuntime
                 settings,
                 i,
                 false,
-                TouchMainCounts[i] > 0 || KeyboardMainPressed[i] || ReplayMainCounts[i] > 0);
+                TouchMainCounts[i] > 0 || KeyboardMainPressed[i] || ReplayMainCounts[i] > 0,
+                eventTime,
+                countStatistics);
         int footCount = Math.Clamp(settings.FootKeyCount, 0, MaxFootKeys);
         for (int i = 0; i < footCount; i++)
             ProcessSlot(
                 settings,
                 i,
                 true,
-                TouchFootCounts[i] > 0 || KeyboardFootPressed[i] || ReplayFootCounts[i] > 0);
+                TouchFootCounts[i] > 0 || KeyboardFootPressed[i] || ReplayFootCounts[i] > 0,
+                eventTime,
+                countStatistics);
     }
 
-    private static void ProcessSlot(KeyViewerSettings settings, int index, bool foot, bool current)
+    private static void ProcessReplayV2Batches(
+        JipperKeyViewerPlugin plugin,
+        KeyViewerSettings settings,
+        Vector2 display)
+    {
+        while (ReplayV2Batches.TryDequeue(out var batch))
+        {
+            Interlocked.Add(
+                ref _replayV2QueuedEvents,
+                -Math.Max(1, batch.Events.Count));
+            if (batch.Kind == VirtualInputBatchKind.Started)
+            {
+                if (_replayV2Active && _replayV2SessionGeneration != batch.SessionGeneration)
+                    plugin.OnReplayV2Ended(_replayV2SessionGeneration);
+                ResetInputState(preserveReplayV2Queue: true);
+                _replayV2Active = true;
+                _replayV2SessionGeneration = batch.SessionGeneration;
+                _replayV2TimelineBase = _time;
+                plugin.OnReplayV2Started(batch.SessionGeneration);
+                continue;
+            }
+            if (!_replayV2Active || batch.SessionGeneration != _replayV2SessionGeneration)
+                continue;
+            if (batch.Kind is VirtualInputBatchKind.Events or VirtualInputBatchKind.Snapshot)
+            {
+                var countStatistics = batch.Kind == VirtualInputBatchKind.Events;
+                foreach (var input in batch.Events)
+                {
+                    ApplyReplayV2Input(settings, display, input);
+                    ProcessKeyStates(
+                        settings,
+                        _replayV2TimelineBase + Math.Max(0, input.OffsetMicroseconds) / 1_000_000f,
+                        countStatistics);
+                }
+                continue;
+            }
+            if (batch.Kind == VirtualInputBatchKind.Cancelled)
+            {
+                foreach (var input in batch.Events)
+                {
+                    ApplyReplayV2Input(settings, display, input);
+                    ProcessKeyStates(
+                        settings,
+                        _replayV2TimelineBase + Math.Max(0, input.OffsetMicroseconds) / 1_000_000f);
+                }
+                ClearReplayTouchInputState(clearRain: false);
+                ClearReplayKeyboardInputState();
+                ProcessKeyStates(settings);
+                continue;
+            }
+            if (batch.Kind == VirtualInputBatchKind.Ended)
+            {
+                ClearReplayTouchInputState(clearRain: true);
+                ClearReplayKeyboardInputState();
+                ProcessKeyStates(settings);
+                var generation = _replayV2SessionGeneration;
+                _replayV2Active = false;
+                _replayV2SessionGeneration = 0;
+                _replayV2TimelineBase = 0f;
+                plugin.OnReplayV2Ended(generation);
+            }
+        }
+    }
+
+    private static void ApplyReplayV2Input(
+        KeyViewerSettings settings,
+        Vector2 display,
+        VirtualInputEvent input)
+    {
+        if (input.Device == VirtualInputDevice.Keyboard)
+        {
+            if (!settings.KeyboardInputEnabled ||
+                !KeyViewerKeyMap.TryParse(input.CanonicalKey, out var key))
+                return;
+            if (input.Phase == VirtualInputPhase.Down)
+                ReplayDownKeys.Add(key);
+            else if (input.Phase is VirtualInputPhase.Up or VirtualInputPhase.Cancel)
+                ReplayDownKeys.Remove(key);
+            ApplyReplayKeyboardState(settings);
+            return;
+        }
+        if (!settings.TouchInputEnabled)
+            return;
+        switch (input.Phase)
+        {
+            case VirtualInputPhase.Down:
+                var x = input.ViewportWidth > 0f
+                    ? input.X / input.ViewportWidth * display.X
+                    : input.X;
+                var y = input.ViewportHeight > 0f
+                    ? input.Y / input.ViewportHeight * display.Y
+                    : input.Y;
+                PressPointer(settings, display, input.PointerId, x, y, replay: true);
+                break;
+            case VirtualInputPhase.Up:
+                ReleasePointer(input.PointerId, replay: true);
+                break;
+            case VirtualInputPhase.Cancel:
+                ClearReplayTouchInputState(clearRain: false);
+                break;
+        }
+    }
+
+    private static void ProcessSlot(
+        KeyViewerSettings settings,
+        int index,
+        bool foot,
+        bool current,
+        float? eventTime,
+        bool countStatistics)
     {
         bool[] state = foot ? FootPressed : MainPressed;
         if (state[index] == current) return;
         state[index] = current;
         int slot = SlotIndex(index, foot);
+        float timestamp = eventTime ?? _time;
         if (current)
         {
+            if (!countStatistics)
+                return;
             settings.Counts[slot] = Math.Max(0, settings.Counts[slot]) + 1;
             settings.TotalCount = Math.Max(0, settings.TotalCount) + 1;
-            PressTimes.Enqueue(_time);
-            SlotPressTimes[slot].Enqueue(_time);
+            PressTimes.Enqueue(timestamp);
+            SlotPressTimes[slot].Enqueue(timestamp);
             if (settings.EnableRain)
             {
                 KeyRect? rect = FindRect(index, foot);
@@ -587,7 +761,7 @@ internal static unsafe class KeyViewerRuntime
                     {
                         Index = index,
                         Foot = foot,
-                        Started = _time,
+                        Started = timestamp,
                     });
                 }
             }
@@ -599,9 +773,9 @@ internal static unsafe class KeyViewerRuntime
                 RainDrop drop = RainDrops[i];
                 if (!drop.Released.HasValue && IsSameRect(drop, index, foot))
                 {
-                    drop.Released = _time;
+                    drop.Released = timestamp;
                     float speed = Math.Max(20f, settings.RainSpeed);
-                    drop.ReleaseTravel = Math.Max(0f, (_time - drop.Started) * speed);
+                    drop.ReleaseTravel = Math.Max(0f, (timestamp - drop.Started) * speed);
                     break;
                 }
             }
@@ -1379,5 +1553,17 @@ internal static unsafe class KeyViewerRuntime
     private static void DrainReplayKeyboardEvents()
     {
         while (ReplayKeyboardEvents.TryDequeue(out _)) { }
+    }
+
+    private static void DrainReplayV2Batches()
+    {
+        while (ReplayV2Batches.TryDequeue(out var batch))
+        {
+            Interlocked.Add(
+                ref _replayV2QueuedEvents,
+                -Math.Max(1, batch.Events.Count));
+        }
+        if (Volatile.Read(ref _replayV2QueuedEvents) < 0)
+            Interlocked.Exchange(ref _replayV2QueuedEvents, 0);
     }
 }

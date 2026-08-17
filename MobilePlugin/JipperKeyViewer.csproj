@@ -12,10 +12,11 @@
     <DebugType>embedded</DebugType>
     <Deterministic>true</Deterministic>
     <StarryReferences Condition="'$(StarryReferences)' == ''">../../YoonKeyViewer_Mobile/References</StarryReferences>
+    <StarryAnalyzer Condition="'$(StarryAnalyzer)' == ''">$(StarryReferences)/StArray.ModManager.Analyzer.dll</StarryAnalyzer>
   </PropertyGroup>
 
   <ItemGroup>
-    <Analyzer Include="$(StarryReferences)/StArray.ModManager.Analyzer.dll" />
+    <Analyzer Include="$(StarryAnalyzer)" />
     <Reference Include="StArray.ModManager">
       <HintPath>$(StarryReferences)/StArray.ModManager.dll</HintPath>
       <Private>false</Private>
